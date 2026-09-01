@@ -1,0 +1,29 @@
+{
+  "task_id": "demo-counter-clamp",
+  "source": "manual",
+  "objective": "Conversational counter bug demo.",
+  "acceptance_criteria": [
+    "The counter never becomes negative",
+    "The configured Node.js regression test passes after changes"
+  ],
+  "allowed_tools": [
+    "read_file",
+    "list_files",
+    "search_text",
+    "apply_text_patch",
+    "create_file",
+    "run_process",
+    "submit_result",
+    "ask_user"
+  ],
+  "allowed_commands": ["node", "git"],
+  "verification_commands": [
+    {
+      "id": "counter-tests",
+      "program": "node",
+      "args": ["--test", "counter.test.js"],
+      "cwd": "."
+    }
+  ],
+  "target_environment": "local"
+}

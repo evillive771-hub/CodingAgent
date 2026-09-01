@@ -1,0 +1,30 @@
+{
+  "task_id": "coding-agent-chat-profile",
+  "source": "manual",
+  "objective": "Interactive development inside this repository.",
+  "acceptance_criteria": [
+    "The user's current request is addressed",
+    "All configured project tests pass after code changes"
+  ],
+  "allowed_tools": [
+    "read_file",
+    "list_files",
+    "search_text",
+    "apply_text_patch",
+    "create_file",
+    "run_process",
+    "submit_result",
+    "ask_user"
+  ],
+  "allowed_commands": ["git", "python"],
+  "verification_commands": [
+    {
+      "id": "tests",
+      "program": "python",
+      "args": ["-m", "pytest"],
+      "cwd": "."
+    }
+  ],
+  "rule_files": ["AGENTS.md"],
+  "target_environment": "local"
+}

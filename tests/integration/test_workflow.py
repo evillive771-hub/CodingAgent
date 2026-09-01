@@ -1,0 +1,164 @@
+from pathlib import Path
+
+import pytest
+
+from aicoding_agent.adapters.fakes import (
+    FakeBrowserVerifier,
+    FakeChangeInspector,
+    FakeChangePublisher,
+    FakeTeambitionAdapter,
+    FakeTestEnvironmentPublisher,
+    FakeWorkspaceManager,
+)
+from aicoding_agent.domain.models import AgentResult, AgentStatus, CodingOutcome, TaskContract
+from aicoding_agent.persistence.jsonl import AtomicCheckpointStore
+from aicoding_agent.workflow.engine import DeliveryWorkflow, WorkflowError
+from aicoding_agent.workflow.models import ApprovalRecord
+
+
+class CompletedAgent:
+    def __init__(self) -> None:
+        self.workspaces: list[Path] = []
+
+    async def run(self, contract, workspace, *, run_id=None):
+        self.workspaces.append(workspace)
+        return AgentResult(
+            status=AgentStatus.COMPLETED,
+            run_id=run_id or "run",
+            outcome=CodingOutcome(summary="Fixed", changed_files=["app.py"]),
+        )
+
+
+def build_workflow(
+    tmp_path: Path,
+    *,
+    browser_ok: bool = True,
+    agent: CompletedAgent | None = None,
+    workspace_manager: FakeWorkspaceManager | None = None,
+):
+    publisher = FakeTestEnvironmentPublisher()
+    teambition = FakeTeambitionAdapter()
+    change_publisher = FakeChangePublisher()
+    workflow = DeliveryWorkflow(
+        agent=agent or CompletedAgent(),
+        change_inspector=FakeChangeInspector("a" * 64),
+        test_publisher=publisher,
+        browser_verifier=FakeBrowserVerifier(ok=browser_ok),
+        change_publisher=change_publisher,
+        teambition=teambition,
+        checkpoints=AtomicCheckpointStore(tmp_path / "checkpoints"),
+        workspace_manager=workspace_manager,
+    )
+    return workflow, publisher, teambition, change_publisher
+
+
+@pytest.mark.asyncio
+async def test_workflow_waits_for_hash_bound_approval_then_finalizes(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text("print('ok')\n", encoding="utf-8")
+    contract = TaskContract(
+        task_id="TB:123",
+        source="teambition",
+        source_ticket_id="123",
+        objective="Fix ticket",
+        acceptance_criteria=["Browser verification passes"],
+        target_environment="test",
+    )
+    workflow, publisher, teambition, change_publisher = build_workflow(tmp_path)
+
+    first = await workflow.execute(contract, tmp_path, run_id="workflow-run")
+
+    assert first.stage == "awaiting_approval"
+    assert first.approval_subject_hash is not None
+    assert len(publisher.published) == 1
+    assert not teambition.transitions
+    checkpoint = await workflow.checkpoints.load("workflow-run")
+    assert checkpoint is not None
+    assert checkpoint["approval_package"]["subject_hash"] == first.approval_subject_hash
+    assert checkpoint["approval_package"]["subject"]["task"]["contract_hash"]
+
+    final = await workflow.decide(
+        "workflow-run",
+        ApprovalRecord(
+            decision="approved",
+            subject_hash=first.approval_subject_hash,
+            approver="frontend-owner",
+        ),
+    )
+
+    assert final.stage == "completed"
+    assert len(change_publisher.published) == 1
+    assert teambition.transitions[0]["ticket_id"] == "123"
+
+
+@pytest.mark.asyncio
+async def test_failed_test_verification_rolls_back(tmp_path: Path) -> None:
+    contract = TaskContract(
+        task_id="rollback-test",
+        objective="Exercise rollback",
+        acceptance_criteria=["Failure rolls back"],
+        target_environment="test",
+    )
+    workflow, publisher, _, _ = build_workflow(tmp_path, browser_ok=False)
+
+    result = await workflow.execute(contract, tmp_path, run_id="rollback-run")
+
+    assert result.stage == "rolled_back"
+    assert publisher.rolled_back == [publisher.published[0].deployment_id]
+    assert "verification failed" in (result.failure_reason or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_workflow_uses_and_releases_managed_workspace_after_completion(
+    tmp_path: Path,
+) -> None:
+    source_repository = tmp_path / "source"
+    source_repository.mkdir()
+    agent = CompletedAgent()
+    manager = FakeWorkspaceManager(tmp_path / "worktrees")
+    workflow, _, _, _ = build_workflow(
+        tmp_path,
+        agent=agent,
+        workspace_manager=manager,
+    )
+    contract = TaskContract(
+        task_id="managed-workspace",
+        objective="Run inside an isolated workspace",
+        acceptance_criteria=["Only the managed workspace is modified"],
+        target_environment="test",
+    )
+
+    first = await workflow.execute(contract, source_repository, run_id="managed-run")
+
+    assert first.stage == "awaiting_approval"
+    assert agent.workspaces == [Path(manager.prepared[0].path)]
+    assert manager.released == []
+
+    final = await workflow.decide(
+        "managed-run",
+        ApprovalRecord(
+            decision="approved",
+            subject_hash=first.approval_subject_hash or "",
+            approver="frontend-owner",
+        ),
+    )
+
+    assert final.stage == "completed"
+    assert final.workspace_released is True
+    assert manager.released == [manager.prepared[0].lease_id]
+
+
+@pytest.mark.asyncio
+async def test_workflow_refuses_to_overwrite_an_existing_run(tmp_path: Path) -> None:
+    contract = TaskContract(
+        task_id="duplicate-run",
+        objective="Preserve the first workflow checkpoint",
+        acceptance_criteria=["A duplicate run id is rejected"],
+        target_environment="test",
+    )
+    workflow, _, _, _ = build_workflow(tmp_path)
+    first = await workflow.execute(contract, tmp_path, run_id="same-run")
+
+    with pytest.raises(WorkflowError, match="already exists"):
+        await workflow.execute(contract, tmp_path, run_id="same-run")
+
+    assert first.stage == "awaiting_approval"
