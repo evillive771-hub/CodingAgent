@@ -10,7 +10,7 @@
 - [ ] 为具体前端项目配置 lint、typecheck、unit、build 和 Playwright 验证命令。
 - [ ] 接入 Playwright 截图、视频、控制台错误和失败请求证据。
 - [ ] 实现 PostgreSQL 任务、租约、幂等预留和 Worker 恢复。
-- [ ] 根据 Checkpoint 实现中断工作流恢复；当前重复 `run_id` 会失败关闭，避免覆盖旧状态。
+- [x] 根据 Checkpoint 从稳定阶段恢复工作流，已完成副作用使用原幂等键跳过或安全重试。
 - [ ] 实现控制台与人工审批 API。
 - [ ] 加入 Lighthouse、axe-core、视觉回归和浏览器兼容性质量门。
 
@@ -30,3 +30,7 @@
 - [x] 持续对话会话保留并恢复历史，支持 Agent 主动请求用户澄清。
 - [x] 三个零 npm 依赖的前端实例具有可重复的失败基线和独立验证合同。
 - [x] 使用真实 MiMo 完成“修复并验证 → 重启会话 → 继续追问”冒烟测试。
+- [x] 版本化 Plan、持久化 Steering Inbox 和运行中 `/steer /next /interrupt`。
+- [x] 异步 HookBus 保持 PolicyEngine 权威，扩展点不能提升工具权限。
+- [x] 大型工具结果 Evidence 归档，压缩前保存完整 transcript 并保护关键运行状态。
+- [x] 后台任务仅允许精确验证命令，持久化状态并在安全边界注入完成通知。

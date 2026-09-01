@@ -13,7 +13,7 @@ from aicoding_agent.adapters.ports import (
     VerificationReport,
     WorkspaceLease,
 )
-from aicoding_agent.domain.models import TaskContract
+from aicoding_agent.domain.models import TaskContract, canonical_task_contract_payload
 
 
 class FakeTeambitionAdapter:
@@ -82,7 +82,7 @@ class FakeWorkspaceManager:
             base_revision=contract.base_revision or "0" * 40,
             contract_hash=hashlib.sha256(
                 json.dumps(
-                    contract.model_dump(mode="json"),
+                    canonical_task_contract_payload(contract),
                     ensure_ascii=False,
                     sort_keys=True,
                     separators=(",", ":"),

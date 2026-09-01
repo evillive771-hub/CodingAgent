@@ -6,7 +6,12 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from aicoding_agent.agent.background import BackgroundStatus, BackgroundTaskManager
+from aicoding_agent.agent.control import ControlIntent, SteeringInbox
 from aicoding_agent.agent.gate import CompletionGate, GateAction
+from aicoding_agent.agent.hooks import AsyncHookBus, HookContext, HookEvent
+from aicoding_agent.agent.plan import PlanManager
+from aicoding_agent.context.archive import ContextEvidenceArchive
 from aicoding_agent.context.builder import ContextBuilder, compact_messages
 from aicoding_agent.domain.models import (
     AgentResult,
@@ -31,6 +36,9 @@ class AgentLoop:
         completion_gate: CompletionGate | None = None,
         event_sink: EventSink | None = None,
         context_max_chars: int = 240000,
+        hook_bus: AsyncHookBus | None = None,
+        context_archive: ContextEvidenceArchive | None = None,
+        background_manager: BackgroundTaskManager | None = None,
     ) -> None:
         self.model = model
         self.executor = executor
@@ -38,6 +46,9 @@ class AgentLoop:
         self.completion_gate = completion_gate or CompletionGate()
         self.event_sink = event_sink or NullEventSink()
         self.context_max_chars = context_max_chars
+        self.hook_bus = hook_bus or AsyncHookBus()
+        self.context_archive = context_archive
+        self.background_manager = background_manager
 
     async def run(
         self,
@@ -46,21 +57,53 @@ class AgentLoop:
         *,
         run_id: str | None = None,
         conversation_history: list[dict[str, str]] | None = None,
+        plan_manager: PlanManager | None = None,
+        control: SteeringInbox | None = None,
+        background_manager: BackgroundTaskManager | None = None,
     ) -> AgentResult:
         resolved_workspace = workspace.resolve()
         if not resolved_workspace.is_dir():
             raise ValueError(f"Workspace does not exist: {resolved_workspace}")
         run_id = run_id or uuid4().hex
+        background_manager = background_manager or self.background_manager
         started_at = time.monotonic()
         tool_context = ToolContext(
             workspace=resolved_workspace,
             contract=contract,
             emit=lambda event_type, data: self.event_sink.emit(run_id, event_type, data),
+            plan_manager=plan_manager,
+            run_id=run_id,
+            background_manager=background_manager,
         )
+        if plan_manager is not None:
+            await plan_manager.initialize()
+        if control is not None:
+            await control.initialize()
+        if background_manager is not None:
+            await background_manager.initialize()
         messages = self.context_builder.build(
             contract,
             resolved_workspace,
             conversation_history=conversation_history,
+            active_plan=plan_manager.render() if plan_manager is not None else None,
+        )
+        prompt_hooks = await self.hook_bus.trigger(
+            HookEvent.USER_PROMPT_SUBMIT,
+            HookContext(
+                run_id=run_id,
+                workspace=resolved_workspace,
+                contract=contract,
+                user_message=contract.objective,
+            ),
+        )
+        if prompt_hooks.block_reason:
+            return AgentResult(
+                status=AgentStatus.FAILED,
+                run_id=run_id,
+                reason=f"UserPromptSubmit hook blocked the run: {prompt_hooks.block_reason}",
+            )
+        messages.extend(
+            {"role": "user", "content": message} for message in prompt_hooks.inject_messages
         )
         tool_definitions = self.executor.registry.definitions(contract.allowed_tools)
         turns = 0
@@ -78,17 +121,62 @@ class AgentLoop:
         )
 
         while turns < contract.budget.max_turns:
+            if background_manager is not None:
+                await self._inject_background_notifications(
+                    background_manager,
+                    messages,
+                    run_id=run_id,
+                    tool_context=tool_context,
+                )
+            if control is not None:
+                control_result = await self._apply_control(
+                    control,
+                    messages,
+                    run_id=run_id,
+                    plan_manager=plan_manager,
+                    turns=turns,
+                    tool_calls=tool_call_count,
+                    tool_context=tool_context,
+                )
+                if control_result is not None:
+                    return control_result
             if time.monotonic() - started_at > contract.budget.max_elapsed_seconds:
                 return await self._budget_result(
                     run_id, turns, tool_call_count, "Maximum elapsed time reached"
                 )
             turns += 1
             await self.event_sink.emit(run_id, "agent.turn_started", {"turn": turns})
-            try:
-                response = await self.model.complete(
-                    compact_messages(messages, max_chars=self.context_max_chars),
-                    tool_definitions,
+            before_model = await self.hook_bus.trigger(
+                HookEvent.BEFORE_MODEL_CALL,
+                HookContext(
+                    run_id=run_id,
+                    workspace=resolved_workspace,
+                    contract=contract,
+                    turn=turns,
+                ),
+            )
+            if before_model.block_reason:
+                return AgentResult(
+                    status=AgentStatus.FAILED,
+                    run_id=run_id,
+                    turns=turns,
+                    tool_calls=tool_call_count,
+                    reason=f"BeforeModelCall hook blocked the run: {before_model.block_reason}",
                 )
+            messages.extend(
+                {"role": "user", "content": message} for message in before_model.inject_messages
+            )
+            try:
+                model_messages = (
+                    await self.context_archive.compact(
+                        messages,
+                        run_id=run_id,
+                        max_chars=self.context_max_chars,
+                    )
+                    if self.context_archive is not None
+                    else compact_messages(messages, max_chars=self.context_max_chars)
+                )
+                response = await self.model.complete(model_messages, tool_definitions)
             except ModelError as exc:
                 await self.event_sink.emit(
                     run_id,
@@ -121,14 +209,69 @@ class AgentLoop:
                 },
             )
 
+            if self._has_current_control(control):
+                if response.tool_calls:
+                    tool_call_count += len(response.tool_calls)
+                    messages.extend(
+                        self._tool_messages(
+                            [
+                                ToolResult(
+                                    tool_call_id=call.id,
+                                    tool_name=call.name,
+                                    ok=False,
+                                    output="Cancelled before execution by a user control message",
+                                )
+                                for call in response.tool_calls
+                            ]
+                        )
+                    )
+                control_result = await self._apply_control(
+                    control,
+                    messages,
+                    run_id=run_id,
+                    plan_manager=plan_manager,
+                    turns=turns,
+                    tool_calls=tool_call_count,
+                    tool_context=tool_context,
+                )
+                if control_result is not None:
+                    return control_result
+                continue
+
             if response.tool_calls:
                 if tool_call_count + len(response.tool_calls) > contract.budget.max_tool_calls:
                     return await self._budget_result(
                         run_id, turns, tool_call_count, "Maximum tool call budget reached"
                     )
                 tool_call_count += len(response.tool_calls)
-                results = await self.executor.execute_many(response.tool_calls, tool_context)
+                results, control_pending = await self._execute_tool_calls(
+                    response.tool_calls,
+                    tool_context,
+                    control=control,
+                )
                 messages.extend(self._tool_messages(results))
+                await self.hook_bus.trigger(
+                    HookEvent.AFTER_TURN,
+                    HookContext(
+                        run_id=run_id,
+                        workspace=resolved_workspace,
+                        contract=contract,
+                        turn=turns,
+                    ),
+                )
+                if control_pending and control is not None:
+                    control_result = await self._apply_control(
+                        control,
+                        messages,
+                        run_id=run_id,
+                        plan_manager=plan_manager,
+                        turns=turns,
+                        tool_calls=tool_call_count,
+                        tool_context=tool_context,
+                    )
+                    if control_result is not None:
+                        return control_result
+                    continue
                 question = tool_context.state.get("user_question")
                 if isinstance(question, str) and question:
                     result = AgentResult(
@@ -147,6 +290,18 @@ class AgentLoop:
                     return result
                 continue
 
+            stop_hooks = await self.hook_bus.trigger(
+                HookEvent.BEFORE_STOP,
+                HookContext(
+                    run_id=run_id,
+                    workspace=resolved_workspace,
+                    contract=contract,
+                    turn=turns,
+                ),
+            )
+            if stop_hooks.continue_message:
+                messages.append({"role": "user", "content": stop_hooks.continue_message})
+                continue
             decision = self.completion_gate.evaluate(contract, tool_context)
             await self.event_sink.emit(
                 run_id,
@@ -165,6 +320,15 @@ class AgentLoop:
                 )
                 await self.event_sink.emit(
                     run_id, "agent.completed", result.model_dump(mode="json")
+                )
+                await self.hook_bus.trigger(
+                    HookEvent.AFTER_TURN,
+                    HookContext(
+                        run_id=run_id,
+                        workspace=resolved_workspace,
+                        contract=contract,
+                        turn=turns,
+                    ),
                 )
                 return result
 
@@ -191,6 +355,139 @@ class AgentLoop:
         return await self._budget_result(
             run_id, turns, tool_call_count, "Maximum model turn budget reached"
         )
+
+    async def _apply_control(
+        self,
+        control: SteeringInbox,
+        messages: list[dict[str, Any]],
+        *,
+        run_id: str,
+        plan_manager: PlanManager | None,
+        turns: int,
+        tool_calls: int,
+        tool_context: ToolContext,
+    ) -> AgentResult | None:
+        controls = await control.consume_current()
+        for item in controls:
+            if item.intent == ControlIntent.INTERRUPT:
+                result = AgentResult(
+                    status=AgentStatus.INTERRUPTED,
+                    run_id=run_id,
+                    turns=turns,
+                    tool_calls=tool_calls,
+                    reason="Interrupted by the user at a safe Agent boundary",
+                )
+                await self.event_sink.emit(
+                    run_id, "agent.interrupted", {"control_sequence": item.sequence}
+                )
+                return result
+            if item.intent == ControlIntent.STEER:
+                if plan_manager is not None:
+                    await plan_manager.supersede(item.content)
+                tool_context.state["coding_outcome"] = None
+                tool_context.state["user_question"] = None
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            f"<user_steering>{item.content}</user_steering>\n"
+                            "Revise the visible plan before continuing. The frozen task contract "
+                            "and host permissions remain authoritative."
+                        ),
+                    }
+                )
+                await self.event_sink.emit(
+                    run_id,
+                    "agent.steered",
+                    {"control_sequence": item.sequence, "message": item.content},
+                )
+        return None
+
+    async def _execute_tool_calls(
+        self,
+        calls: list[ToolCall],
+        context: ToolContext,
+        *,
+        control: SteeringInbox | None,
+    ) -> tuple[list[ToolResult], bool]:
+        """Preserve safe read concurrency while checking control after each mutation."""
+        results: list[ToolResult] = []
+        index = 0
+        while index < len(calls):
+            tool = self.executor.registry.get(calls[index].name)
+            if tool is not None and tool.concurrency_safe:
+                batch_end = index + 1
+                while batch_end < len(calls):
+                    candidate = self.executor.registry.get(calls[batch_end].name)
+                    if candidate is None or not candidate.concurrency_safe:
+                        break
+                    batch_end += 1
+                results.extend(await self.executor.execute_many(calls[index:batch_end], context))
+                index = batch_end
+            else:
+                results.append(await self.executor.execute(calls[index], context))
+                index += 1
+
+            if self._has_current_control(control):
+                results.extend(
+                    ToolResult(
+                        tool_call_id=call.id,
+                        tool_name=call.name,
+                        ok=False,
+                        output="Cancelled before execution by a user control message",
+                    )
+                    for call in calls[index:]
+                )
+                return results, True
+        return results, False
+
+    @staticmethod
+    def _has_current_control(control: SteeringInbox | None) -> bool:
+        return control is not None and any(
+            item.intent in {ControlIntent.STEER, ControlIntent.INTERRUPT}
+            for item in control.pending
+        )
+
+    async def _inject_background_notifications(
+        self,
+        manager: BackgroundTaskManager,
+        messages: list[dict[str, Any]],
+        *,
+        run_id: str,
+        tool_context: ToolContext,
+    ) -> None:
+        for job in await manager.collect_completed():
+            sequence = await tool_context.next_operation()
+            if (
+                job.status == BackgroundStatus.COMPLETED
+                and job.exit_code == 0
+                and job.verification_id
+            ):
+                tool_context.state["verification_success"][job.verification_id] = sequence
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "<task_notification>"
+                        f"<task_id>{job.job_id}</task_id>"
+                        f"<status>{job.status}</status>"
+                        f"<exit_code>{job.exit_code}</exit_code>"
+                        f"<summary>{job.output}</summary>"
+                        "</task_notification>"
+                    ),
+                }
+            )
+            await self.event_sink.emit(
+                run_id,
+                "background.notification",
+                {
+                    "job_id": job.job_id,
+                    "status": job.status,
+                    "exit_code": job.exit_code,
+                    "verification_id": job.verification_id,
+                    "operation_sequence": sequence,
+                },
+            )
 
     async def _budget_result(
         self,

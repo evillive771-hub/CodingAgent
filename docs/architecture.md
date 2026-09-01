@@ -66,9 +66,9 @@ flowchart TD
 
 ```text
 src/aicoding_agent/
-  agent/          AgentLoop、Session、StopGate
+  agent/          AgentLoop、Plan、Steering、Hooks、Background、StopGate
   tools/          Tool、Registry、Executor、Policy、Hooks
-  context/        ContextPack、规则发现、确定性压缩
+  context/        ContextPack、规则发现、确定性压缩、Evidence 归档
   workflow/       状态机、阶段、Checkpoint、恢复
   domain/         TaskContract、Budget、Evidence、Approval
   adapters/       MiMo、Teambition、Git、Process、Playwright、Publisher
@@ -249,3 +249,24 @@ Stop Gate。每句用户输入派生一个新的 `TaskContract`：权限和验�
 
 三个演示实例分别覆盖状态逻辑 Bug、搜索需求和无障碍需求，使用 Node.js 内置 test runner，
 不安装第三方 npm 包。启动脚本先复制模板到忽略的 `runtime/chat-demos/`，避免重复演示污染基线。
+
+## 15. 运行时控制、扩展与恢复
+
+单 Agent Loop 增加了一个宿主控制面，但没有改变“模型提出动作、宿主校验动作”的安全边界：
+
+- `PlanManager` 用只追加 JSONL 保存完整计划版本；每版最多一个 `in_progress`，转向时旧版先标记
+  `superseded`，Stop Gate 要求模型生成新计划并完成全部项目；
+- `SteeringInbox` 持久化 `steer / next / interrupt`。消息只在工具结束后或下一次模型调用前消费；
+  如果消息在模型调用期间到达，尚未执行的旧方向工具调用会先得到成对的取消结果，再注入新方向；
+- `AsyncHookBus` 提供 `UserPromptSubmit / BeforeModelCall / PreToolUse / PostToolUse /
+  BeforeStop / AfterTurn`。`PreToolUse` 发生在宿主 Policy 允许之后，因此 Hook 只能继续收紧，不能提权；
+- `ContextEvidenceArchive` 在压缩前原子保存完整 transcript；大型工具输出另存 Evidence，模型上下文
+  仅保留头尾、相对路径和 SHA-256。压缩按工具调用组处理，并保护当前合同、计划、最近 Steering
+  和最近验证结果；
+- `BackgroundTaskManager` 只运行合同内的精确验证命令，使用 `asyncio` 子进程、有限输出和持久化
+  Job。完成通知在安全边界注入 Agent Loop；宿主重启后未完成 Job 明确标记为 `interrupted`；
+- `DeliveryWorkflow.resume(run_id)` 从最近 Checkpoint 继续。已保存的 Agent 结果、变更快照、部署、
+  验证、审批包和 Git 发布回执不会重复计算；部署、回滚、Git 发布及 TB 写入复用稳定幂等键。
+
+生产发布边界保持不变：恢复只能继续测试环境交付与审批后的候选分支/TB 流转，不能触发生产发布。
+详细决策见 [ADR-0008](adr/0008-runtime-control-and-resume.md)。

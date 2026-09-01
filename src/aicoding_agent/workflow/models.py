@@ -52,6 +52,7 @@ class WorkflowRun(WorkflowModel):
     approval_subject_hash: str | None = None
     approval: dict[str, Any] | None = None
     publish_receipt: dict[str, Any] | None = None
+    rollback_idempotency_key: str | None = None
     failure_reason: str | None = None
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 

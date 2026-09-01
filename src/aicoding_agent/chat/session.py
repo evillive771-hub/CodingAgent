@@ -6,6 +6,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
+from aicoding_agent.agent.background import BackgroundTaskManager
+from aicoding_agent.agent.control import SteeringInbox
+from aicoding_agent.agent.plan import PlanManager
 from aicoding_agent.chat.models import ChatTurn
 from aicoding_agent.chat.store import ChatTranscriptStore, validate_session_id
 from aicoding_agent.domain.models import AgentResult, TargetEnvironment, TaskContract, TaskSource
@@ -19,6 +22,9 @@ class ConversationalAgent(Protocol):
         *,
         run_id: str | None = None,
         conversation_history: list[dict[str, str]] | None = None,
+        plan_manager: PlanManager | None = None,
+        control: SteeringInbox | None = None,
+        background_manager: BackgroundTaskManager | None = None,
     ) -> AgentResult: ...
 
 
@@ -33,6 +39,9 @@ class ChatSession:
         session_id: str = "default",
         max_history_turns: int = 12,
         max_history_chars: int = 40000,
+        plan_manager: PlanManager | None = None,
+        control: SteeringInbox | None = None,
+        background_manager: BackgroundTaskManager | None = None,
     ) -> None:
         if profile.target_environment != TargetEnvironment.LOCAL:
             raise ValueError("Conversational coding only permits the local target environment")
@@ -43,6 +52,9 @@ class ChatSession:
         self.session_id = validate_session_id(session_id)
         self.max_history_turns = max_history_turns
         self.max_history_chars = max_history_chars
+        self.plan_manager = plan_manager or PlanManager(scope_id=self.session_id)
+        self.control = control or SteeringInbox(scope_id=self.session_id)
+        self.background_manager = background_manager or BackgroundTaskManager()
         self.turns: list[ChatTurn] = []
         self._initialized = False
         self._send_lock = asyncio.Lock()
@@ -51,6 +63,9 @@ class ChatSession:
         if not self.workspace.is_dir():
             raise ValueError(f"Workspace does not exist: {self.workspace}")
         self.turns = await self.store.load(self.session_id)
+        await self.plan_manager.initialize()
+        await self.control.initialize()
+        await self.background_manager.initialize()
         self._initialized = True
 
     async def send(self, user_message: str) -> ChatTurn:
@@ -70,6 +85,9 @@ class ChatSession:
                 self.workspace,
                 run_id=run_id,
                 conversation_history=self._conversation_history(),
+                plan_manager=self.plan_manager,
+                control=self.control,
+                background_manager=self.background_manager,
             )
             turn = ChatTurn(
                 turn_number=turn_number,
@@ -100,7 +118,15 @@ class ChatSession:
                     "Address the user's current conversational request exactly.",
                     *configured_criteria,
                 ][:100],
-                "allowed_tools": sorted(self.profile.allowed_tools | {"ask_user"}),
+                "allowed_tools": sorted(
+                    self.profile.allowed_tools
+                    | {
+                        "ask_user",
+                        "background_status",
+                        "start_background_process",
+                        "update_plan",
+                    }
+                ),
                 "target_environment": TargetEnvironment.LOCAL,
                 "created_at": datetime.now(UTC),
             }

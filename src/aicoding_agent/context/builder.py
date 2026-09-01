@@ -21,6 +21,8 @@ Rules:
 - Do not modify tests merely to hide a product defect.
 - After every code mutation, rerun every required verification command.
 - Before finishing, call submit_result with a factual summary, changed files, and remaining risks.
+- When update_plan is available, use it for multi-step work and keep its status current.
+- When a user steering message arrives, revise the plan before continuing in the new direction.
 - A submitted result is only a proposal. The host independently checks verification evidence.
 - Git push, ticket transitions, test deployment, and production release are not your tools.
 - Prior conversation messages provide context; the current task contract remains authoritative.
@@ -37,6 +39,7 @@ class ContextBuilder:
         workspace: Path,
         *,
         conversation_history: list[dict[str, str]] | None = None,
+        active_plan: str | None = None,
     ) -> list[dict[str, Any]]:
         rule_sections: list[str] = []
         remaining = self.max_rule_chars
@@ -76,6 +79,10 @@ class ContextBuilder:
             if role not in {"user", "assistant"} or not isinstance(content, str):
                 continue
             messages.append({"role": role, "content": content})
+        if active_plan:
+            messages.append(
+                {"role": "user", "content": f"<active_plan>\n{active_plan}\n</active_plan>"}
+            )
         messages.append({"role": "user", "content": task_message})
         return messages
 
@@ -109,40 +116,45 @@ def compact_messages(
     if sum(_message_size(message) for message in copied) <= max_chars:
         return copied
 
-    groups = _message_groups(copied[2:])
-    while len(groups) > 1:
+    system_messages = [message for message in copied if message.get("role") == "system"]
+    non_system = [message for message in copied if message.get("role") != "system"]
+    groups = _message_groups(non_system)
+    protected = _protected_group_indexes(groups)
+    marker = {
+        "role": "user",
+        "content": (
+            "<context_compacted>Older complete message groups were removed. "
+            "The task contract, active plan, latest steering, and latest verification evidence "
+            "remain authoritative.</context_compacted>"
+        ),
+    }
+    removable = [index for index in range(len(groups)) if index not in protected]
+    removed: set[int] = set()
+    while removable:
         candidate = (
-            copied[:2]
+            system_messages
+            + [marker]
             + [
-                {
-                    "role": "user",
-                    "content": (
-                        "<context_compacted>Older complete message groups were removed."
-                        "</context_compacted>"
-                    ),
-                }
+                message
+                for index, group in enumerate(groups)
+                if index not in removed
+                for message in group
             ]
-            + [message for group in groups for message in group]
         )
         if sum(_message_size(item) for item in candidate) <= max_chars:
             return candidate
-        groups.pop(0)
+        removed.add(removable.pop(0))
 
-    preserved = (
-        copied[:2]
+    return (
+        system_messages
+        + [marker]
         + [
-            {
-                "role": "user",
-                "content": (
-                    "<context_compacted>Older conversation messages were removed. "
-                    "The task contract remains authoritative; inspect the workspace and rerun "
-                    "verification instead of assuming removed results.</context_compacted>"
-                ),
-            }
+            message
+            for index, group in enumerate(groups)
+            if index not in removed
+            for message in group
         ]
-        + [message for group in groups for message in group]
     )
-    return preserved
 
 
 def _message_groups(messages: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
@@ -168,3 +180,26 @@ def _message_groups(messages: list[dict[str, Any]]) -> list[list[dict[str, Any]]
                 index += 1
         groups.append(group)
     return groups
+
+
+def _protected_group_indexes(groups: list[list[dict[str, Any]]]) -> set[int]:
+    """Protect current control state and only the latest verification-bearing group."""
+    protected: set[int] = set()
+    latest_by_kind: dict[str, int] = {}
+    for index, group in enumerate(groups):
+        for message in group:
+            content = str(message.get("content", ""))
+            if content.startswith("# Task contract"):
+                latest_by_kind["task"] = index
+            if "<active_plan>" in content:
+                latest_by_kind["plan"] = index
+            if "<user_steering>" in content:
+                latest_by_kind["steering"] = index
+            if "<task_notification>" in content or (
+                message.get("role") == "tool"
+                and '"verification_id"' in content
+                and '"exit_code": 0' in content
+            ):
+                latest_by_kind["verification"] = index
+    protected.update(latest_by_kind.values())
+    return protected

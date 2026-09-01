@@ -6,6 +6,7 @@ from pathlib import Path
 
 from pydantic import Field, field_validator
 
+from aicoding_agent.agent.plan import PlanItem, PlanStatus
 from aicoding_agent.domain.models import CodingOutcome, ToolRisk
 from aicoding_agent.tools.base import (
     BaseTool,
@@ -310,13 +311,7 @@ class RunProcessTool(BaseTool[RunProcessInput]):
         limit = context.contract.budget.max_tool_output_chars
         output = _bounded_text(combined or "<no output>", limit)
 
-        verification_id = None
-        argv = (Path(arguments.program.lower()).stem, *arguments.args)
-        for command in context.contract.verification_commands:
-            expected = (Path(command.program.lower()).stem, *command.args)
-            if argv == expected and arguments.cwd == command.cwd:
-                verification_id = command.id
-                break
+        verification_id = _verification_id(arguments, context)
         return ToolExecution(
             output=f"exit_code={process.returncode}\n{output}",
             data={
@@ -326,6 +321,71 @@ class RunProcessTool(BaseTool[RunProcessInput]):
                 "verification_id": verification_id,
             },
         )
+
+
+def _verification_id(arguments: RunProcessInput, context: ToolContext) -> str | None:
+    argv = (Path(arguments.program.lower()).stem, *arguments.args)
+    for command in context.contract.verification_commands:
+        expected = (Path(command.program.lower()).stem, *command.args)
+        if argv == expected and arguments.cwd == command.cwd:
+            return command.id
+    return None
+
+
+class StartBackgroundProcessInput(RunProcessInput):
+    pass
+
+
+class StartBackgroundProcessTool(BaseTool[StartBackgroundProcessInput]):
+    name = "start_background_process"
+    description = (
+        "Start an exact contract-approved verification command in the background. "
+        "Completion is injected later as a task notification."
+    )
+    input_model = StartBackgroundProcessInput
+    risk = ToolRisk.PROCESS
+
+    async def run(
+        self, arguments: StartBackgroundProcessInput, context: ToolContext
+    ) -> ToolExecution:
+        if context.background_manager is None:
+            raise ToolError("This Agent run has no background task manager")
+        cwd = resolve_workspace_path(
+            context.workspace,
+            arguments.cwd,
+            allowed_prefixes=context.contract.allowed_path_prefixes,
+        )
+        if not cwd.is_dir():
+            raise ToolError(f"Process cwd does not exist: {arguments.cwd}")
+        job = await context.background_manager.start(
+            program=arguments.program,
+            args=arguments.args,
+            cwd=cwd,
+            env=_safe_process_environment(),
+            timeout_seconds=arguments.timeout_seconds,
+            verification_id=_verification_id(arguments, context),
+        )
+        return ToolExecution(
+            output=f"Background task started: {job.job_id}",
+            data={"background_job_id": job.job_id, "status": job.status},
+        )
+
+
+class BackgroundStatusInput(ToolInput):
+    pass
+
+
+class BackgroundStatusTool(BaseTool[BackgroundStatusInput]):
+    name = "background_status"
+    description = "Show bounded status lines for background tasks in this Agent session."
+    input_model = BackgroundStatusInput
+    risk = ToolRisk.READ
+    concurrency_safe = True
+
+    async def run(self, arguments: BackgroundStatusInput, context: ToolContext) -> ToolExecution:
+        if context.background_manager is None:
+            raise ToolError("This Agent run has no background task manager")
+        return ToolExecution(output=context.background_manager.render())
 
 
 class SubmitResultInput(ToolInput):
@@ -373,6 +433,47 @@ class AskUserTool(BaseTool[AskUserInput]):
         )
 
 
+class UpdatePlanItemInput(ToolInput):
+    content: str = Field(min_length=1, max_length=2000)
+    status: PlanStatus = PlanStatus.PENDING
+    evidence: list[str] = Field(default_factory=list, max_length=20)
+
+
+class UpdatePlanInput(ToolInput):
+    items: list[UpdatePlanItemInput] = Field(min_length=1, max_length=20)
+    direction: str = Field(default="", max_length=20000)
+
+
+class UpdatePlanTool(BaseTool[UpdatePlanInput]):
+    name = "update_plan"
+    description = (
+        "Replace the visible execution plan with 1-20 validated items. "
+        "Use at most one in_progress item and update the plan after user steering."
+    )
+    input_model = UpdatePlanInput
+    risk = ToolRisk.WRITE
+
+    async def run(self, arguments: UpdatePlanInput, context: ToolContext) -> ToolExecution:
+        if context.plan_manager is None:
+            raise ToolError("This Agent run has no plan manager")
+        snapshot = await context.plan_manager.replace(
+            [
+                PlanItem(
+                    content=item.content,
+                    status=item.status,
+                    evidence=item.evidence,
+                    source="agent",
+                )
+                for item in arguments.items
+            ],
+            direction=arguments.direction,
+        )
+        return ToolExecution(
+            output=context.plan_manager.render(),
+            data={"plan_version": snapshot.version, "plan_state": snapshot.state},
+        )
+
+
 def build_builtin_registry() -> ToolRegistry:
     registry = ToolRegistry()
     for tool in (
@@ -382,8 +483,11 @@ def build_builtin_registry() -> ToolRegistry:
         ApplyTextPatchTool(),
         CreateFileTool(),
         RunProcessTool(),
+        StartBackgroundProcessTool(),
+        BackgroundStatusTool(),
         SubmitResultTool(),
         AskUserTool(),
+        UpdatePlanTool(),
     ):
         registry.register(tool)
     return registry

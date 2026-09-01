@@ -5,6 +5,9 @@ from pathlib import Path
 
 import pytest
 
+from aicoding_agent.agent.background import BackgroundTaskManager
+from aicoding_agent.agent.control import SteeringInbox
+from aicoding_agent.agent.plan import PlanManager
 from aicoding_agent.chat.session import ChatSession
 from aicoding_agent.chat.store import ChatTranscriptStore
 from aicoding_agent.domain.models import (
@@ -27,6 +30,9 @@ class RecordingAgent:
         *,
         run_id: str | None = None,
         conversation_history: list[dict[str, str]] | None = None,
+        plan_manager: PlanManager | None = None,
+        control: SteeringInbox | None = None,
+        background_manager: BackgroundTaskManager | None = None,
     ) -> AgentResult:
         self.calls.append(
             {

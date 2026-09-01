@@ -8,12 +8,19 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import typer
+from prompt_toolkit import PromptSession
+from prompt_toolkit.patch_stdout import patch_stdout
 
+from aicoding_agent.agent.background import BackgroundJobStore, BackgroundTaskManager
+from aicoding_agent.agent.control import ControlIntent, ControlStore, SteeringInbox
+from aicoding_agent.agent.hooks import AsyncHookBus
 from aicoding_agent.agent.loop import AgentLoop
+from aicoding_agent.agent.plan import PlanManager, PlanStore
 from aicoding_agent.chat.console import ChatEventSink
 from aicoding_agent.chat.session import ChatSession
 from aicoding_agent.chat.store import ChatStoreError, ChatTranscriptStore
 from aicoding_agent.config import ConfigurationError, ModelSettings
+from aicoding_agent.context.archive import ContextEvidenceArchive
 from aicoding_agent.domain.models import TaskContract
 from aicoding_agent.model.mimo import MimoChatModel
 from aicoding_agent.persistence.jsonl import JsonlEventSink
@@ -161,9 +168,19 @@ async def _run_agent(
     settings: ModelSettings,
 ):
     model = MimoChatModel(settings)
-    event_sink = JsonlEventSink(workspace / ".aicoding-agent" / "runs")
-    executor = ToolExecutor(build_builtin_registry())
-    agent = AgentLoop(model=model, executor=executor, event_sink=event_sink)
+    runtime_root = workspace / ".aicoding-agent"
+    event_sink = JsonlEventSink(runtime_root / "runs")
+    hook_bus = AsyncHookBus()
+    background = BackgroundTaskManager(store=BackgroundJobStore(runtime_root / "background"))
+    executor = ToolExecutor(build_builtin_registry(), hook_bus=hook_bus)
+    agent = AgentLoop(
+        model=model,
+        executor=executor,
+        event_sink=event_sink,
+        hook_bus=hook_bus,
+        context_archive=ContextEvidenceArchive(runtime_root / "evidence"),
+        background_manager=background,
+    )
     try:
         return await agent.run(contract, workspace)
     finally:
@@ -260,10 +277,19 @@ async def _chat_loop(
     persistent_events = JsonlEventSink(runtime_root / "events")
     event_sink = ChatEventSink(persistent_events, writer=typer.echo)
     model = MimoChatModel(settings)
+    hook_bus = AsyncHookBus()
+    executor = ToolExecutor(build_builtin_registry(), hook_bus=hook_bus)
+    plan_manager = PlanManager(store=PlanStore(runtime_root / "sessions"), scope_id=session_id)
+    control = SteeringInbox(store=ControlStore(runtime_root / "sessions"), scope_id=session_id)
+    background = BackgroundTaskManager(
+        store=BackgroundJobStore(runtime_root / "sessions" / session_id / "background")
+    )
     agent = AgentLoop(
         model=model,
-        executor=ToolExecutor(build_builtin_registry()),
+        executor=executor,
         event_sink=event_sink,
+        hook_bus=hook_bus,
+        context_archive=ContextEvidenceArchive(runtime_root / "evidence"),
     )
     session = ChatSession(
         agent=agent,
@@ -271,49 +297,158 @@ async def _chat_loop(
         profile=contract,
         store=ChatTranscriptStore(runtime_root / "sessions"),
         session_id=session_id,
+        plan_manager=plan_manager,
+        control=control,
+        background_manager=background,
     )
     try:
         await session.initialize()
         typer.secho("AI Coding Agent Chat", fg=typer.colors.CYAN, bold=True)
         typer.echo(f"workspace: {workspace}")
         typer.echo(f"session: {session_id} ({len(session.history)} previous turn(s))")
-        typer.echo("Type a request naturally. Commands: /help /status /history /exit\n")
-        while True:
+        typer.echo(
+            "Commands: /plan /steer <message> /next <message> /interrupt /status /history /exit\n"
+        )
+        prompt_session: PromptSession[str] = PromptSession()
+        with patch_stdout(raw=True):
+            await _interactive_chat(prompt_session, session, workspace, session_id)
+    finally:
+        await model.aclose()
+
+
+async def _interactive_chat(
+    prompt_session: PromptSession[str],
+    session: ChatSession,
+    workspace: Path,
+    session_id: str,
+) -> None:
+    active: asyncio.Task[Any] | None = None
+    exit_after_active = False
+    while True:
+        if active is None:
+            queued = await session.control.consume_next()
+            if queued is not None:
+                typer.echo(f"[next] {queued.content}")
+                active = asyncio.create_task(session.send(queued.content))
+                continue
             try:
-                query = await asyncio.to_thread(input, "You > ")
-            except EOFError:
-                break
-            command = query.strip().lower()
-            if command in {"/exit", "/quit", "exit", "quit"}:
-                break
-            if command == "/help":
-                typer.echo(
-                    "Natural language starts an Agent turn. /status shows session state; "
-                    "/history shows prior messages; /exit closes the chat."
-                )
-                continue
-            if command == "/status":
-                typer.echo(
-                    f"workspace={workspace}; session={session_id}; turns={len(session.history)}"
-                )
-                continue
-            if command == "/history":
-                if not session.history:
-                    typer.echo("<empty conversation>")
-                for turn in session.history:
-                    typer.echo(f"[{turn.turn_number}] You: {turn.user_message[:200]}")
-                    typer.echo(f"[{turn.turn_number}] Agent: {turn.assistant_message[:300]}")
-                continue
-            if not query.strip():
-                continue
-            turn = await session.send(query)
+                query = await prompt_session.prompt_async("You > ")
+            except (EOFError, KeyboardInterrupt):
+                return
+            action = await _handle_chat_input(
+                query,
+                session=session,
+                workspace=workspace,
+                session_id=session_id,
+                busy=False,
+            )
+            if action == "exit":
+                return
+            if action.startswith("start:"):
+                active = asyncio.create_task(session.send(action.removeprefix("start:")))
+            continue
+
+        prompt_task: asyncio.Task[str] | None = None
+        if not exit_after_active:
+            prompt_task = asyncio.create_task(
+                prompt_session.prompt_async("Busy (/steer, /next, /interrupt) > ")
+            )
+        waiters: set[asyncio.Task[Any]] = {active}
+        if prompt_task is not None:
+            waiters.add(prompt_task)
+        done, _ = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+        if active in done:
+            if prompt_task is not None and not prompt_task.done():
+                prompt_task.cancel()
+                await asyncio.gather(prompt_task, return_exceptions=True)
+            turn = active.result()
             typer.secho("\nAgent >", fg=typer.colors.GREEN, bold=True)
             typer.echo(turn.assistant_message)
             if turn.status not in {"completed", "waiting_for_user"}:
                 typer.echo(f"[turn status: {turn.status}; reason: {turn.reason or 'unknown'}]")
             typer.echo()
-    finally:
-        await model.aclose()
+            active = None
+            if exit_after_active:
+                return
+            continue
+
+        if prompt_task is None:
+            continue
+        try:
+            query = prompt_task.result()
+        except (EOFError, KeyboardInterrupt):
+            await session.control.submit(ControlIntent.INTERRUPT)
+            exit_after_active = True
+            continue
+        action = await _handle_chat_input(
+            query,
+            session=session,
+            workspace=workspace,
+            session_id=session_id,
+            busy=True,
+        )
+        if action == "exit":
+            await session.control.submit(ControlIntent.INTERRUPT)
+            exit_after_active = True
+
+
+async def _handle_chat_input(
+    query: str,
+    *,
+    session: ChatSession,
+    workspace: Path,
+    session_id: str,
+    busy: bool,
+) -> str:
+    text = query.strip()
+    lowered = text.lower()
+    if not text:
+        return "none"
+    if lowered in {"/exit", "/quit", "exit", "quit"}:
+        return "exit"
+    if lowered == "/help":
+        typer.echo(
+            "Natural text starts a turn; while busy it steers the current turn. "
+            "/next queues a later turn and /interrupt stops at the next safe boundary."
+        )
+        return "none"
+    if lowered == "/plan":
+        typer.echo(session.plan_manager.render())
+        return "none"
+    if lowered == "/status":
+        typer.echo(
+            f"workspace={workspace}; session={session_id}; turns={len(session.history)}; "
+            f"busy={busy}\n{session.background_manager.render()}"
+        )
+        return "none"
+    if lowered == "/history":
+        if not session.history:
+            typer.echo("<empty conversation>")
+        for turn in session.history:
+            typer.echo(f"[{turn.turn_number}] You: {turn.user_message[:200]}")
+            typer.echo(f"[{turn.turn_number}] Agent: {turn.assistant_message[:300]}")
+        return "none"
+    if lowered == "/interrupt":
+        if busy:
+            await session.control.submit(ControlIntent.INTERRUPT)
+            typer.echo("[control] interrupt queued for the next safe boundary")
+        else:
+            typer.echo("[control] no Agent turn is running")
+        return "none"
+    for prefix, intent in (("/steer ", ControlIntent.STEER), ("/next ", ControlIntent.NEXT)):
+        if lowered.startswith(prefix):
+            content = text[len(prefix) :].strip()
+            if intent == ControlIntent.STEER and not busy:
+                typer.echo("[control] /steer requires a running Agent turn")
+                return "none"
+            await session.control.submit(intent, content)
+            typer.echo(f"[control] {intent} queued")
+            return "none"
+    if busy:
+        await session.control.submit(ControlIntent.STEER, text)
+        typer.echo("[control] steering queued")
+        return "none"
+    return f"start:{text}"
 
 
 if __name__ == "__main__":

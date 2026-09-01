@@ -9,13 +9,14 @@ from aicoding_agent.adapters.ports import (
     ChangeInspector,
     ChangePublisher,
     DeploymentReceipt,
+    PublishReceipt,
     TeambitionPort,
     TestEnvironmentPublisher,
     WorkspaceLease,
     WorkspaceManager,
 )
 from aicoding_agent.agent.loop import AgentLoop
-from aicoding_agent.domain.models import AgentStatus, TargetEnvironment, TaskContract
+from aicoding_agent.domain.models import AgentResult, AgentStatus, TargetEnvironment, TaskContract
 from aicoding_agent.persistence.base import EventSink, NullEventSink
 from aicoding_agent.persistence.jsonl import AtomicCheckpointStore
 from aicoding_agent.workflow.approval import ApprovalPackageBuilder
@@ -110,65 +111,113 @@ class DeliveryWorkflow:
             contract=contract.model_dump(mode="json"),
         )
         await self._save(run, "workflow.created")
-        deployment: DeploymentReceipt | None = None
+        return await self._advance_to_approval(run)
+
+    async def resume(self, run_id: str) -> WorkflowResult:
+        payload = await self.checkpoints.load(run_id)
+        if payload is None:
+            raise WorkflowError(f"Unknown workflow run: {run_id}")
+        run = WorkflowRun.model_validate(payload)
+        contract = TaskContract.model_validate(run.contract)
+        if contract.target_environment != TargetEnvironment.TEST:
+            raise WorkflowError("DeliveryWorkflow only permits the test target environment")
+        if run.stage in {
+            DeliveryStage.AWAITING_APPROVAL,
+            DeliveryStage.COMPLETED,
+            DeliveryStage.FAILED,
+            DeliveryStage.ROLLED_BACK,
+        }:
+            return self._result(run)
+        await self._save(run, "workflow.resume_started")
+        if run.stage == DeliveryStage.FINALIZING:
+            return await self._finalize(run)
+        if run.stage == DeliveryStage.ROLLING_BACK:
+            receipt = DeploymentReceipt.model_validate(run.deployment_receipt)
+            await self._rollback(
+                run,
+                receipt,
+                idempotency_key=run.rollback_idempotency_key or f"{run_id}:resume-rollback",
+            )
+            return self._result(run)
+        return await self._advance_to_approval(run)
+
+    async def _advance_to_approval(self, run: WorkflowRun) -> WorkflowResult:
+        contract = TaskContract.model_validate(run.contract)
+        source_workspace = Path(run.source_workspace or run.workspace).resolve()
         try:
-            await self._transition(run, DeliveryStage.PREPARING_WORKSPACE)
-            if self.workspace_manager is not None:
-                lease = await self.workspace_manager.prepare(
-                    source_workspace,
-                    contract,
-                    run_id=run_id,
-                )
-                run.workspace = lease.path
-                run.workspace_lease = lease.model_dump(mode="json")
-                await self._save(run, "workflow.workspace_prepared")
+            if run.stage == DeliveryStage.CREATED:
+                await self._transition(run, DeliveryStage.PREPARING_WORKSPACE)
+            if run.stage == DeliveryStage.PREPARING_WORKSPACE:
+                if self.workspace_manager is not None:
+                    lease = await self.workspace_manager.prepare(
+                        source_workspace,
+                        contract,
+                        run_id=run.run_id,
+                    )
+                    run.workspace = lease.path
+                    run.workspace_lease = lease.model_dump(mode="json")
+                    await self._save(run, "workflow.workspace_prepared")
+                await self._transition(run, DeliveryStage.CODING)
             active_workspace = Path(run.workspace)
 
-            await self._transition(run, DeliveryStage.CODING)
-            agent_result = await self.agent.run(contract, active_workspace, run_id=run_id)
-            run.agent_result = agent_result.model_dump(mode="json")
-            if agent_result.status != AgentStatus.COMPLETED:
-                raise WorkflowError(agent_result.reason or "Coding Agent did not complete")
+            if run.stage == DeliveryStage.CODING:
+                if run.agent_result is None:
+                    agent_result = await self.agent.run(
+                        contract, active_workspace, run_id=run.run_id
+                    )
+                    run.agent_result = agent_result.model_dump(mode="json")
+                    await self._save(run, "workflow.coding_completed")
+                else:
+                    agent_result = AgentResult.model_validate(run.agent_result)
+                if agent_result.status != AgentStatus.COMPLETED:
+                    raise WorkflowError(agent_result.reason or "Coding Agent did not complete")
+                await self._transition(run, DeliveryStage.INSPECTING_CHANGES)
 
-            await self._transition(run, DeliveryStage.INSPECTING_CHANGES)
-            change_snapshot = await self.change_inspector.snapshot(active_workspace)
-            run.change_snapshot = change_snapshot.model_dump(mode="json")
+            if run.stage == DeliveryStage.INSPECTING_CHANGES:
+                if run.change_snapshot is None:
+                    change_snapshot = await self.change_inspector.snapshot(active_workspace)
+                    run.change_snapshot = change_snapshot.model_dump(mode="json")
+                    await self._save(run, "workflow.changes_inspected")
+                await self._transition(run, DeliveryStage.TEST_DEPLOYING)
 
-            await self._transition(run, DeliveryStage.TEST_DEPLOYING)
-            deployment = await self.test_publisher.publish(
-                active_workspace,
-                contract,
-                change_hash=change_snapshot.change_hash,
-                idempotency_key=f"{run_id}:test-deploy",
-            )
-            run.deployment_receipt = deployment.model_dump(mode="json")
+            if run.stage == DeliveryStage.TEST_DEPLOYING:
+                if run.deployment_receipt is None:
+                    change_hash = str((run.change_snapshot or {}).get("change_hash", ""))
+                    deployment = await self.test_publisher.publish(
+                        active_workspace,
+                        contract,
+                        change_hash=change_hash,
+                        idempotency_key=f"{run.run_id}:test-deploy",
+                    )
+                    run.deployment_receipt = deployment.model_dump(mode="json")
+                    await self._save(run, "workflow.test_deployed")
+                await self._transition(run, DeliveryStage.TEST_VERIFYING)
 
-            await self._transition(run, DeliveryStage.TEST_VERIFYING)
-            report = await self.browser_verifier.verify(deployment, contract)
-            run.verification_report = report.model_dump(mode="json")
-            if not report.ok:
-                raise WorkflowError(f"Test environment verification failed: {report.summary}")
-
-            approval_package = self.approval_builder.build(run)
-            run.approval_package = approval_package.model_dump(mode="json")
-            run.approval_subject_hash = approval_package.subject_hash
-            await self._transition(run, DeliveryStage.AWAITING_APPROVAL)
+            if run.stage == DeliveryStage.TEST_VERIFYING:
+                deployment = DeploymentReceipt.model_validate(run.deployment_receipt)
+                if run.verification_report is None:
+                    report = await self.browser_verifier.verify(deployment, contract)
+                    run.verification_report = report.model_dump(mode="json")
+                    await self._save(run, "workflow.test_verified")
+                if not bool((run.verification_report or {}).get("ok")):
+                    summary = str((run.verification_report or {}).get("summary", "unknown"))
+                    raise WorkflowError(f"Test environment verification failed: {summary}")
+                if run.approval_package is None:
+                    approval_package = self.approval_builder.build(run)
+                    run.approval_package = approval_package.model_dump(mode="json")
+                    run.approval_subject_hash = approval_package.subject_hash
+                    await self._save(run, "workflow.approval_package_built")
+                await self._transition(run, DeliveryStage.AWAITING_APPROVAL)
             return self._result(run)
         except Exception as exc:
             run.failure_reason = f"{type(exc).__name__}: {exc}"
-            if deployment is not None:
-                try:
-                    await self._transition(run, DeliveryStage.ROLLING_BACK)
-                    await self.test_publisher.rollback(
-                        deployment,
-                        idempotency_key=f"{run_id}:rollback",
-                    )
-                    await self._transition(run, DeliveryStage.ROLLED_BACK)
-                except Exception as rollback_exc:
-                    run.failure_reason += (
-                        f"; rollback failed: {type(rollback_exc).__name__}: {rollback_exc}"
-                    )
-                    await self._transition(run, DeliveryStage.FAILED)
+            if run.deployment_receipt is not None:
+                deployment = DeploymentReceipt.model_validate(run.deployment_receipt)
+                await self._rollback(
+                    run,
+                    deployment,
+                    idempotency_key=f"{run.run_id}:rollback",
+                )
             else:
                 await self._transition(run, DeliveryStage.FAILED)
             return self._result(run)
@@ -194,34 +243,42 @@ class DeliveryWorkflow:
             return self._result(run)
 
         await self._transition(run, DeliveryStage.FINALIZING)
+        return await self._finalize(run)
+
+    async def _finalize(self, run: WorkflowRun) -> WorkflowResult:
         try:
             contract = TaskContract.model_validate(run.contract)
             current = await self.change_inspector.snapshot(Path(run.workspace))
-            expected = str(run.change_snapshot["change_hash"])
+            expected = str((run.change_snapshot or {})["change_hash"])
             if current.change_hash != expected:
                 run.failure_reason = "Workspace changed after approval was requested"
                 receipt = DeploymentReceipt.model_validate(run.deployment_receipt)
                 await self._rollback(
                     run,
                     receipt,
-                    idempotency_key=f"{run_id}:changed-after-approval-rollback",
+                    idempotency_key=f"{run.run_id}:changed-after-approval-rollback",
                 )
                 return self._result(run)
-            published = await self.change_publisher.publish(
-                Path(run.workspace),
-                contract,
-                expected_change_hash=expected,
-                idempotency_key=f"{run_id}:git-publish",
-            )
-            run.publish_receipt = published.model_dump(mode="json")
+            if run.publish_receipt is None:
+                published = await self.change_publisher.publish(
+                    Path(run.workspace),
+                    contract,
+                    expected_change_hash=expected,
+                    idempotency_key=f"{run.run_id}:git-publish",
+                )
+                run.publish_receipt = published.model_dump(mode="json")
+                await self._save(run, "workflow.git_published")
+            else:
+                published = PublishReceipt.model_validate(run.publish_receipt)
             if contract.source_ticket_id:
                 evidence = list((run.verification_report or {}).get("evidence_refs", []))
                 await self.teambition.transition_to_testing(
                     contract.source_ticket_id,
                     revision=published.revision,
                     evidence_refs=evidence,
-                    idempotency_key=f"{run_id}:tb-testing",
+                    idempotency_key=f"{run.run_id}:tb-testing",
                 )
+                await self._save(run, "workflow.teambition_updated")
             await self._transition(run, DeliveryStage.COMPLETED)
             await self._release_workspace(run, suppress_errors=True)
         except Exception as exc:
@@ -230,7 +287,7 @@ class DeliveryWorkflow:
             await self._rollback(
                 run,
                 receipt,
-                idempotency_key=f"{run_id}:finalization-rollback",
+                idempotency_key=f"{run.run_id}:finalization-rollback",
             )
         return self._result(run)
 
@@ -280,7 +337,11 @@ class DeliveryWorkflow:
         idempotency_key: str,
     ) -> None:
         try:
-            await self._transition(run, DeliveryStage.ROLLING_BACK)
+            run.rollback_idempotency_key = idempotency_key
+            if run.stage != DeliveryStage.ROLLING_BACK:
+                await self._transition(run, DeliveryStage.ROLLING_BACK)
+            else:
+                await self._save(run, "workflow.rollback_resumed")
             await self.test_publisher.rollback(receipt, idempotency_key=idempotency_key)
             await self._transition(run, DeliveryStage.ROLLED_BACK)
         except Exception as exc:

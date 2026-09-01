@@ -104,6 +104,18 @@ class TaskContract(StrictModel):
         return self
 
 
+def canonical_task_contract_payload(
+    contract: TaskContract | dict[str, Any],
+) -> dict[str, Any]:
+    validated = (
+        contract if isinstance(contract, TaskContract) else TaskContract.model_validate(contract)
+    )
+    payload = validated.model_dump(mode="json")
+    payload["allowed_tools"] = sorted(validated.allowed_tools)
+    payload["allowed_commands"] = sorted(validated.allowed_commands)
+    return payload
+
+
 class ToolCall(StrictModel):
     id: str = Field(min_length=1, max_length=256)
     name: str = Field(min_length=1, max_length=128)
@@ -137,6 +149,7 @@ class CodingOutcome(StrictModel):
 class AgentStatus(StrEnum):
     COMPLETED = "completed"
     WAITING_FOR_USER = "waiting_for_user"
+    INTERRUPTED = "interrupted"
     BUDGET_EXHAUSTED = "budget_exhausted"
     FAILED = "failed"
 

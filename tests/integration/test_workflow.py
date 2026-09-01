@@ -10,6 +10,7 @@ from aicoding_agent.adapters.fakes import (
     FakeTestEnvironmentPublisher,
     FakeWorkspaceManager,
 )
+from aicoding_agent.adapters.ports import VerificationReport
 from aicoding_agent.domain.models import AgentResult, AgentStatus, CodingOutcome, TaskContract
 from aicoding_agent.persistence.jsonl import AtomicCheckpointStore
 from aicoding_agent.workflow.engine import DeliveryWorkflow, WorkflowError
@@ -27,6 +28,30 @@ class CompletedAgent:
             run_id=run_id or "run",
             outcome=CodingOutcome(summary="Fixed", changed_files=["app.py"]),
         )
+
+
+class PlannedCrash(BaseException):
+    pass
+
+
+class CrashOnceVerifier:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def verify(self, receipt, contract):
+        self.calls += 1
+        if self.calls == 1:
+            raise PlannedCrash("simulated host crash")
+        return VerificationReport(
+            ok=True,
+            summary="Recovered verification passed",
+            evidence_refs=["fake://evidence/recovered"],
+        )
+
+
+class CrashOnceTeambition(FakeTeambitionAdapter):
+    async def transition_to_testing(self, *args, **kwargs):
+        raise PlannedCrash("simulated host crash after Git publication")
 
 
 def build_workflow(
@@ -162,3 +187,68 @@ async def test_workflow_refuses_to_overwrite_an_existing_run(tmp_path: Path) -> 
         await workflow.execute(contract, tmp_path, run_id="same-run")
 
     assert first.stage == "awaiting_approval"
+
+
+@pytest.mark.asyncio
+async def test_workflow_resumes_from_test_verification_checkpoint(tmp_path: Path) -> None:
+    contract = TaskContract(
+        task_id="resume-verification",
+        objective="Resume after a host crash",
+        acceptance_criteria=["The deployment is not repeated"],
+        target_environment="test",
+    )
+    workflow, publisher, _, _ = build_workflow(tmp_path)
+    verifier = CrashOnceVerifier()
+    workflow.browser_verifier = verifier
+
+    with pytest.raises(PlannedCrash):
+        await workflow.execute(contract, tmp_path, run_id="resume-run")
+
+    checkpoint = await workflow.checkpoints.load("resume-run")
+    assert checkpoint is not None
+    assert checkpoint["stage"] == "test_verifying"
+    assert checkpoint["deployment_receipt"] is not None
+
+    result = await workflow.resume("resume-run")
+
+    assert result.stage == "awaiting_approval"
+    assert verifier.calls == 2
+    assert len(publisher.published) == 1
+
+
+@pytest.mark.asyncio
+async def test_workflow_resumes_finalization_without_republishing_git(tmp_path: Path) -> None:
+    contract = TaskContract(
+        task_id="resume-finalization",
+        source="teambition",
+        source_ticket_id="TB-9",
+        objective="Resume finalization",
+        acceptance_criteria=["Git publication is idempotent"],
+        target_environment="test",
+    )
+    workflow, _, _, change_publisher = build_workflow(tmp_path)
+    waiting = await workflow.execute(contract, tmp_path, run_id="finalize-resume")
+    workflow.teambition = CrashOnceTeambition()
+
+    with pytest.raises(PlannedCrash):
+        await workflow.decide(
+            "finalize-resume",
+            ApprovalRecord(
+                decision="approved",
+                subject_hash=waiting.approval_subject_hash or "",
+                approver="frontend-owner",
+            ),
+        )
+
+    checkpoint = await workflow.checkpoints.load("finalize-resume")
+    assert checkpoint is not None
+    assert checkpoint["stage"] == "finalizing"
+    assert checkpoint["publish_receipt"] is not None
+    recovered_teambition = FakeTeambitionAdapter()
+    workflow.teambition = recovered_teambition
+
+    result = await workflow.resume("finalize-resume")
+
+    assert result.stage == "completed"
+    assert len(change_publisher.published) == 1
+    assert recovered_teambition.transitions[0]["ticket_id"] == "TB-9"

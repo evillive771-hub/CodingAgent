@@ -8,6 +8,7 @@ from typing import Any, Literal
 
 from pydantic import Field
 
+from aicoding_agent.domain.models import canonical_task_contract_payload
 from aicoding_agent.workflow.models import WorkflowModel, WorkflowRun
 
 
@@ -47,7 +48,7 @@ class ApprovalPackageBuilder:
         if not isinstance(evidence_refs, list) or not evidence_refs:
             raise ApprovalPackageError("Approval package requires verification evidence")
 
-        contract_hash = self._hash(contract)
+        contract_hash = self._hash(canonical_task_contract_payload(contract))
         if run.workspace_lease is not None:
             lease_contract_hash = run.workspace_lease.get("contract_hash")
             if lease_contract_hash != contract_hash:

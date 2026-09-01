@@ -47,6 +47,36 @@ async def test_unapproved_process_is_denied(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_background_process_requires_an_exact_verification_command(
+    tmp_path: Path,
+) -> None:
+    contract = TaskContract(
+        task_id="background-policy",
+        objective="Keep background work bounded",
+        acceptance_criteria=["Only exact verification commands can run"],
+        allowed_tools={"start_background_process"},
+        verification_commands=[
+            VerificationCommand(id="tests", program="python", args=["-m", "pytest"])
+        ],
+    )
+    context = ToolContext(workspace=tmp_path, contract=contract)
+    executor = ToolExecutor(build_builtin_registry())
+
+    result = await executor.execute(
+        ToolCall(
+            id="background-call",
+            name="start_background_process",
+            arguments={"program": "python", "args": ["-c", "print('not allowed')"]},
+        ),
+        context,
+    )
+
+    assert not result.ok
+    assert result.policy_denied
+    assert "exact verification command" in result.output
+
+
+@pytest.mark.asyncio
 async def test_secret_bearing_file_is_not_readable(tmp_path: Path) -> None:
     (tmp_path / "env.txt").write_text("MIMO_API_KEY=secret", encoding="utf-8")
     contract = TaskContract(

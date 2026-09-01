@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from aicoding_agent.adapters.ports import ChangeSnapshot, PublishReceipt, WorkspaceLease
-from aicoding_agent.domain.models import TaskContract
+from aicoding_agent.domain.models import TaskContract, canonical_task_contract_payload
 
 
 class GitInspectionError(RuntimeError):
@@ -335,7 +335,7 @@ class LocalGitWorktreeManager:
     @staticmethod
     def _contract_hash(contract: TaskContract) -> str:
         canonical = json.dumps(
-            contract.model_dump(mode="json"),
+            canonical_task_contract_payload(contract),
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),

@@ -16,6 +16,10 @@
 - 审批后幂等推送候选分支，不自动合并、不强推；
 - 合同、Agent 结果、变更、测试部署和验证证据组成结构化审批包；
 - Claude Code 风格的持续对话会话，可恢复历史并在需要时向用户追问；
+- 持久化版本计划、运行中 `/steer`、排队 `/next` 和安全 `/interrupt`；
+- 异步 Hook、受合同约束的后台验证任务和完成通知；
+- 大型工具输出 Evidence 归档、压缩前完整 transcript 快照；
+- 可从稳定 Checkpoint 恢复的幂等交付工作流；
 - 完成后自动释放托管 worktree，失败时默认保留现场。
 
 真实 Teambition 写回、Git 凭据与 clone/fetch、测试设备部署、Playwright 场景和
@@ -71,8 +75,13 @@ You > 再补一个边界测试
 ```
 
 对话使用同一工作区并按 session 持久化。重新使用 `--session default` 会恢复之前的用户/Agent
-摘要；`/history` 查看历史，`/status` 查看状态，`/exit` 退出。运行事件和对话记录保存在受保护的
+摘要。Agent 工作时仍可继续输入：自然语言或 `/steer <要求>` 会改变当前方向，`/next <任务>`
+排到当前轮之后，`/interrupt` 在下一个安全边界终止；`/plan` 查看版本化计划。`/history` 查看历史，
+`/status` 查看会话和后台任务，`/exit` 退出。运行事件和对话记录保存在受保护的
 `.aicoding-agent/`，不会作为候选代码发布。
+
+后台任务不是任意 Shell：模型只能用 `start_background_process` 启动任务合同中的精确验证命令，
+进程使用 `executable + argv` 异步执行。Git 推送、Teambition 写入和部署仍不属于模型工具。
 
 ### 前端对话实例
 

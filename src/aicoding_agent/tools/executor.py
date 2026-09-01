@@ -6,6 +6,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from aicoding_agent.agent.hooks import AsyncHookBus, HookContext, HookEvent
 from aicoding_agent.domain.models import ToolCall, ToolResult
 from aicoding_agent.tools.base import ToolContext, ToolError, ToolRegistry
 from aicoding_agent.tools.policy import PolicyBehavior, PolicyEngine
@@ -21,11 +22,13 @@ class ToolExecutor:
         policy: PolicyEngine | None = None,
         pre_hooks: list[ToolHook] | None = None,
         post_hooks: list[ToolHook] | None = None,
+        hook_bus: AsyncHookBus | None = None,
     ) -> None:
         self.registry = registry
         self.policy = policy or PolicyEngine()
         self.pre_hooks = pre_hooks or []
         self.post_hooks = post_hooks or []
+        self.hook_bus = hook_bus or AsyncHookBus()
         self._mutation_lock = asyncio.Lock()
 
     async def execute_many(
@@ -103,6 +106,26 @@ class ToolExecutor:
                     policy_denied=True,
                 )
 
+        hook_response = await self.hook_bus.trigger(
+            HookEvent.PRE_TOOL_USE,
+            HookContext(
+                run_id=context.run_id,
+                workspace=context.workspace,
+                contract=context.contract,
+                tool_call=call,
+            ),
+        )
+        if hook_response.block_reason:
+            result = ToolResult(
+                tool_call_id=call.id,
+                tool_name=call.name,
+                ok=False,
+                output=f"PreToolUse hook blocked the call: {hook_response.block_reason}",
+                policy_denied=True,
+            )
+            await self._emit(context, "tool.hook_blocked", result.model_dump())
+            return result
+
         operation_sequence = await context.next_operation()
         await self._emit(
             context,
@@ -148,6 +171,16 @@ class ToolExecutor:
 
         for hook in self.post_hooks:
             await hook(call, result)
+        await self.hook_bus.trigger(
+            HookEvent.POST_TOOL_USE,
+            HookContext(
+                run_id=context.run_id,
+                workspace=context.workspace,
+                contract=context.contract,
+                tool_call=call,
+                tool_result=result,
+            ),
+        )
         await self._emit(context, "tool.finished", result.model_dump())
         return result
 

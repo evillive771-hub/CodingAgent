@@ -65,7 +65,7 @@ class PolicyEngine:
             except ToolError as exc:
                 return PolicyDecision(behavior=PolicyBehavior.DENY, reason=str(exc))
 
-        if tool.name == "run_process":
+        if tool.name in {"run_process", "start_background_process"}:
             program = str(argument_data.get("program", "")).lower()
             program_name = Path(program).stem
             args = tuple(str(item) for item in argument_data.get("args", []))
@@ -84,6 +84,11 @@ class PolicyEngine:
             safe_git_read = (
                 program_name == "git" and bool(args) and args[0] in READ_ONLY_GIT_SUBCOMMANDS
             )
+            if tool.name == "start_background_process" and not exact_verification:
+                return PolicyDecision(
+                    behavior=PolicyBehavior.DENY,
+                    reason="Background processes must be exact verification commands",
+                )
             if not exact_verification and not safe_git_read:
                 return PolicyDecision(
                     behavior=PolicyBehavior.DENY,

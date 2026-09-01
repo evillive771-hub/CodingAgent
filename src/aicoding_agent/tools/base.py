@@ -3,11 +3,15 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from aicoding_agent.domain.models import TaskContract, ToolRisk
+
+if TYPE_CHECKING:
+    from aicoding_agent.agent.background import BackgroundTaskManager
+    from aicoding_agent.agent.plan import PlanManager
 
 
 class ToolError(RuntimeError):
@@ -36,10 +40,16 @@ class ToolContext:
         workspace: Path,
         contract: TaskContract,
         emit: EventEmitter | None = None,
+        plan_manager: PlanManager | None = None,
+        run_id: str = "run",
+        background_manager: BackgroundTaskManager | None = None,
     ) -> None:
         self.workspace = workspace.resolve()
         self.contract = contract
         self.emit = emit
+        self.plan_manager = plan_manager
+        self.run_id = run_id
+        self.background_manager = background_manager
         self.state: dict[str, Any] = {
             "operation_sequence": 0,
             "last_mutation_sequence": 0,
