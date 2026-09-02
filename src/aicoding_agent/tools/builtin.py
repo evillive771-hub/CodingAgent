@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import stat
 from pathlib import Path
+from uuid import uuid4
 
 from pydantic import Field, field_validator
 
@@ -25,6 +27,31 @@ def _bounded_text(value: str, limit: int) -> str:
     half = max(1, limit // 2)
     omitted = len(value) - (half * 2)
     return f"{value[:half]}\n... <{omitted} characters omitted> ...\n{value[-half:]}"
+
+
+def _write_utf8_atomic(path: Path, content: str, *, create_only: bool = False) -> None:
+    """Publish fully written content while the host-owned file lock is held."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
+    existing_mode = None
+    if path.exists() and not create_only:
+        existing_mode = stat.S_IMODE(path.stat().st_mode)
+    try:
+        with temporary.open("x", encoding="utf-8", newline="") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if existing_mode is not None:
+            temporary.chmod(existing_mode)
+        if create_only:
+            try:
+                os.link(temporary, path)
+            except FileExistsError as exc:
+                raise ToolError(f"Path already exists: {path.name}") from exc
+        else:
+            os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _safe_process_environment() -> dict[str, str]:
@@ -217,7 +244,7 @@ class ApplyTextPatchTool(BaseTool[ApplyTextPatchInput]):
             arguments.new_text,
             arguments.expected_replacements,
         )
-        path.write_text(updated, encoding="utf-8", newline="")
+        _write_utf8_atomic(path, updated)
         return ToolExecution(
             output=f"Updated {arguments.path} ({actual} replacement(s))",
             data={"path": arguments.path, "replacements": actual},
@@ -245,8 +272,10 @@ class CreateFileTool(BaseTool[CreateFileInput]):
         )
         if path.exists():
             raise ToolError(f"Path already exists: {arguments.path}")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(arguments.content, encoding="utf-8", newline="")
+        try:
+            _write_utf8_atomic(path, arguments.content, create_only=True)
+        except ToolError as exc:
+            raise ToolError(f"Path already exists: {arguments.path}") from exc
         return ToolExecution(
             output=f"Created {arguments.path}",
             data={"path": arguments.path},

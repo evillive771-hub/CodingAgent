@@ -7,8 +7,10 @@ from typing import Any
 from pydantic import ValidationError
 
 from aicoding_agent.agent.hooks import AsyncHookBus, HookContext, HookEvent
-from aicoding_agent.domain.models import ToolCall, ToolResult
+from aicoding_agent.domain.models import ToolCall, ToolResult, ToolRisk
 from aicoding_agent.tools.base import ToolContext, ToolError, ToolRegistry
+from aicoding_agent.tools.file_lock import WorkspaceFileLockManager
+from aicoding_agent.tools.paths import resolve_workspace_path
 from aicoding_agent.tools.policy import PolicyBehavior, PolicyEngine
 
 ToolHook = Callable[[ToolCall, ToolResult | None], Awaitable[str | None]]
@@ -23,12 +25,14 @@ class ToolExecutor:
         pre_hooks: list[ToolHook] | None = None,
         post_hooks: list[ToolHook] | None = None,
         hook_bus: AsyncHookBus | None = None,
+        file_locks: WorkspaceFileLockManager | None = None,
     ) -> None:
         self.registry = registry
         self.policy = policy or PolicyEngine()
         self.pre_hooks = pre_hooks or []
         self.post_hooks = post_hooks or []
         self.hook_bus = hook_bus or AsyncHookBus()
+        self.file_locks = file_locks or WorkspaceFileLockManager()
         self._mutation_lock = asyncio.Lock()
 
     async def execute_many(
@@ -137,7 +141,47 @@ class ToolExecutor:
                 execution = await tool.run(arguments, context)
             else:
                 async with self._mutation_lock:
-                    execution = await tool.run(arguments, context)
+                    argument_data = arguments.model_dump()
+                    raw_path = argument_data.get("path")
+                    if tool.risk == ToolRisk.WRITE and isinstance(raw_path, str):
+                        target = resolve_workspace_path(
+                            context.workspace,
+                            raw_path,
+                            allowed_prefixes=context.contract.allowed_path_prefixes,
+                            for_write=True,
+                        )
+                        lease = None
+                        try:
+                            async with self.file_locks.acquire(
+                                context.workspace,
+                                target,
+                                owner=context.run_id,
+                            ) as acquired_lease:
+                                lease = acquired_lease
+                                await self._emit(
+                                    context,
+                                    "file_lock.acquired",
+                                    {
+                                        "tool_call_id": call.id,
+                                        "target": lease.target,
+                                        "owner": lease.owner,
+                                        "waited_seconds": round(lease.waited_seconds, 6),
+                                    },
+                                )
+                                execution = await tool.run(arguments, context)
+                        finally:
+                            if lease is not None:
+                                await self._emit(
+                                    context,
+                                    "file_lock.released",
+                                    {
+                                        "tool_call_id": call.id,
+                                        "target": lease.target,
+                                        "owner": lease.owner,
+                                    },
+                                )
+                    else:
+                        execution = await tool.run(arguments, context)
             result = ToolResult(
                 tool_call_id=call.id,
                 tool_name=call.name,

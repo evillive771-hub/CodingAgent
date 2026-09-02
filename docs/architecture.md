@@ -270,3 +270,28 @@ Stop Gate。每句用户输入派生一个新的 `TaskContract`：权限和验�
 
 生产发布边界保持不变：恢复只能继续测试环境交付与审批后的候选分支/TB 流转，不能触发生产发布。
 详细决策见 [ADR-0008](adr/0008-runtime-control-and-resume.md)。
+
+## 16. 跨 Agent 文件锁
+
+已提交版本原先只有 `ToolExecutor` 内的 `asyncio.Lock`，只能串行同一 Executor 实例中的写工具。
+当两个 Agent 进程共享同一个工作区时，它们仍可能同时执行读-改-写并互相覆盖。当前写工具增加两层锁：
+
+1. 进程内 `asyncio.Lock` 避免同一 LockManager 内无意义的轮询；
+2. `.aicoding-agent/locks/<path-hash>.lock` 使用 Windows `msvcrt.locking` 或 POSIX `flock`
+   实现跨进程互斥。
+
+锁键来自工作区内规范化相对路径，不允许指向工作区之外。获得锁后写入临时 owner 元数据，记录
+`run_id`、PID、目标路径和时间；超时错误可指出当前持有者。`ToolExecutor` 追加
+`file_lock.acquired` 与 `file_lock.released` 审计事件。Agent 取消、工具失败和异常退出时，宿主在
+`finally` 中释放锁；进程崩溃时 OS 会回收 advisory lock，下一位持有者覆盖可能残留的元数据。
+
+`apply_text_patch` 在锁内重新读取原内容并校验精确匹配，然后使用同目录临时文件、`fsync` 和
+`os.replace` 原子发布，同时保留原文件模式。`create_file` 使用完全写入的临时文件和原子硬链接，
+并保持“已存在则拒绝”。因此两个 Agent 针对同一旧文本修改时，后执行者会看到新版本并明确失败，
+而不是静默覆盖。
+
+该锁只覆盖一次文件工具调用，不代表任务级文件所有权。不同文件仍可并发；同一文件的多个独立修改
+可以顺序合并。大范围多 Agent 开发仍优先使用 task-bound Git worktree，因为文件锁不能解决跨文件
+语义冲突、测试环境冲突或合并策略。此取舍参考 `learn-claude-code` s13 的“共享任务存储加锁，代码
+编辑使用任务绑定 worktree”模式，而不是把整个仓库锁成单线程。详细决策见
+[ADR-0009](adr/0009-cross-agent-file-locking.md)。

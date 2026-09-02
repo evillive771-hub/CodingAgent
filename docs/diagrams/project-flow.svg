@@ -1,0 +1,210 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1150" viewBox="0 0 1600 1150">
+  <defs>
+    <linearGradient id="header" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#17345f"/>
+      <stop offset="0.58" stop-color="#2456a6"/>
+      <stop offset="1" stop-color="#e85b13"/>
+    </linearGradient>
+    <linearGradient id="agentBg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f6f9ff"/>
+      <stop offset="1" stop-color="#eef5ff"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="5" stdDeviation="7" flood-color="#12345b" flood-opacity="0.12"/>
+    </filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#52657a"/>
+    </marker>
+    <marker id="arrowBlue" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2563eb"/>
+    </marker>
+    <marker id="arrowOrange" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#ea580c"/>
+    </marker>
+    <marker id="arrowGreen" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#16a34a"/>
+    </marker>
+    <style>
+      .title { font: 700 30px 'Microsoft YaHei','Segoe UI',sans-serif; fill: #fff; }
+      .subtitle { font: 400 15px 'Microsoft YaHei','Segoe UI',sans-serif; fill: #dbeafe; }
+      .section { font: 700 20px 'Microsoft YaHei','Segoe UI',sans-serif; fill: #17345f; }
+      .cardTitle { font: 700 16px 'Microsoft YaHei','Segoe UI',sans-serif; fill: #183153; }
+      .body { font: 400 13px 'Microsoft YaHei','Segoe UI',sans-serif; fill: #52657a; }
+      .small { font: 400 12px 'Microsoft YaHei','Segoe UI',sans-serif; fill: #64748b; }
+      .whiteTitle { font: 700 16px 'Microsoft YaHei','Segoe UI',sans-serif; fill: #fff; }
+      .tag { font: 600 12px 'Microsoft YaHei','Segoe UI',sans-serif; }
+      .center { text-anchor: middle; }
+      .flow { fill: none; stroke: #52657a; stroke-width: 2.2; marker-end: url(#arrow); }
+      .flowBlue { fill: none; stroke: #2563eb; stroke-width: 2.2; marker-end: url(#arrowBlue); }
+      .flowOrange { fill: none; stroke: #ea580c; stroke-width: 2.2; marker-end: url(#arrowOrange); }
+      .flowGreen { fill: none; stroke: #16a34a; stroke-width: 2.2; marker-end: url(#arrowGreen); }
+      .dash { stroke-dasharray: 7 6; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="1150" fill="#f3f6fa"/>
+  <rect x="18" y="18" width="1564" height="1114" rx="18" fill="#fff" stroke="#d9e2ec"/>
+  <path d="M18,36 Q18,18 36,18 H1564 Q1582,18 1582,36 V112 H18 Z" fill="url(#header)"/>
+  <text x="800" y="62" class="title center">AI Coding Agent — 对话驱动的前端修复与测试交付</text>
+  <text x="800" y="91" class="subtitle center">单 Agent Loop + 宿主控制面 + 确定性交付工作流；生产发布始终在系统边界之外</text>
+
+  <!-- Legend -->
+  <g transform="translate(52 132)">
+    <rect width="14" height="14" rx="3" fill="#eaf2ff" stroke="#2563eb"/><text x="22" y="12" class="small">Agent / 模型</text>
+    <rect x="126" width="14" height="14" rx="3" fill="#fff4e8" stroke="#ea580c"/><text x="148" y="12" class="small">异步 / 控制</text>
+    <rect x="266" width="14" height="14" rx="3" fill="#edf9f0" stroke="#16a34a"/><text x="288" y="12" class="small">验证 / 通过</text>
+    <rect x="400" width="14" height="14" rx="3" fill="#fff0f0" stroke="#dc2626"/><text x="422" y="12" class="small">审批 / 安全边界</text>
+    <rect x="574" width="14" height="14" rx="3" fill="#f1f5f9" stroke="#475569"/><text x="596" y="12" class="small">确定性宿主流程</text>
+  </g>
+
+  <!-- Intake flow -->
+  <text x="52" y="184" class="section">① 任务进入与合同冻结</text>
+  <g filter="url(#shadow)">
+    <rect x="52" y="202" width="205" height="92" rx="13" fill="#f8fafc" stroke="#64748b" stroke-width="1.7"/>
+    <rect x="284" y="202" width="225" height="92" rx="13" fill="#f8fafc" stroke="#64748b" stroke-width="1.7"/>
+    <rect x="536" y="202" width="235" height="92" rx="13" fill="#f8fafc" stroke="#64748b" stroke-width="1.7"/>
+    <rect x="798" y="202" width="215" height="92" rx="13" fill="#f8fafc" stroke="#64748b" stroke-width="1.7"/>
+    <rect x="1040" y="202" width="235" height="92" rx="13" fill="#eaf2ff" stroke="#2563eb" stroke-width="1.9"/>
+    <rect x="1302" y="202" width="225" height="92" rx="13" fill="#eaf2ff" stroke="#2563eb" stroke-width="1.9"/>
+  </g>
+  <text x="154" y="234" class="cardTitle center">Teambition / 对话</text>
+  <text x="154" y="258" class="body center">读取 Bug、需求或自然语言</text>
+  <text x="154" y="278" class="small center">TB 当前只读；写回不交给模型</text>
+  <text x="396" y="234" class="cardTitle center">TaskContract</text>
+  <text x="396" y="258" class="body center">冻结路径、工具、命令、预算</text>
+  <text x="396" y="278" class="small center">验收标准 + 精确验证命令</text>
+  <text x="653" y="234" class="cardTitle center">DeliveryWorkflow</text>
+  <text x="653" y="258" class="body center">确定性状态机</text>
+  <text x="653" y="278" class="small center">Checkpoint + 幂等键 + 审计事件</text>
+  <text x="905" y="234" class="cardTitle center">隔离 Git Worktree</text>
+  <text x="905" y="258" class="body center">冻结 baseline commit</text>
+  <text x="905" y="278" class="small center">失败保留现场；完成后释放</text>
+  <text x="1157" y="234" class="cardTitle center">Coding Session</text>
+  <text x="1157" y="258" class="body center">持久化对话 + Plan + Control</text>
+  <text x="1157" y="278" class="small center">同一工作区持续多轮对话</text>
+  <text x="1414" y="234" class="cardTitle center">Agent Loop</text>
+  <text x="1414" y="258" class="body center">MiMo 推理 → 工具 → 观察</text>
+  <text x="1414" y="278" class="small center">Stop Gate 决定是否真正完成</text>
+  <path d="M257 248 H276" class="flow"/><path d="M509 248 H528" class="flow"/>
+  <path d="M771 248 H790" class="flow"/><path d="M1013 248 H1032" class="flow"/>
+  <path d="M1275 248 H1294" class="flowBlue"/>
+
+  <!-- Agent loop detail -->
+  <rect x="52" y="330" width="1475" height="442" rx="16" fill="url(#agentBg)" stroke="#93b4e8" stroke-width="1.8"/>
+  <text x="76" y="365" class="section">② Agent Loop：模型驱动求解，宿主掌握权限和完成条件</text>
+
+  <!-- main loop -->
+  <g filter="url(#shadow)">
+    <rect x="78" y="396" width="185" height="86" rx="12" fill="#fff" stroke="#2563eb" stroke-width="1.8"/>
+    <rect x="298" y="396" width="190" height="86" rx="12" fill="#fff" stroke="#2563eb" stroke-width="1.8"/>
+    <rect x="523" y="396" width="180" height="86" rx="12" fill="#fff" stroke="#2563eb" stroke-width="1.8"/>
+    <rect x="738" y="396" width="235" height="86" rx="12" fill="#fff" stroke="#2563eb" stroke-width="1.8"/>
+    <rect x="1008" y="396" width="235" height="86" rx="12" fill="#fff" stroke="#2563eb" stroke-width="1.8"/>
+    <rect x="1278" y="396" width="220" height="86" rx="12" fill="#edf9f0" stroke="#16a34a" stroke-width="1.9"/>
+  </g>
+  <text x="170" y="425" class="cardTitle center">Messages / Context</text>
+  <text x="170" y="449" class="body center">合同、计划、最近转向</text><text x="170" y="468" class="small center">压缩前保存完整 transcript</text>
+  <text x="393" y="425" class="cardTitle center">BeforeModelCall Hook</text>
+  <text x="393" y="449" class="body center">宿主注入提醒或阻止</text><text x="393" y="468" class="small center">异步扩展点，不增加权限</text>
+  <text x="613" y="425" class="cardTitle center">MiMo LLM</text>
+  <text x="613" y="449" class="body center">规划、判断、提出 Tool Calls</text><text x="613" y="468" class="small center">不直接修改外部系统</text>
+  <text x="855" y="425" class="cardTitle center">Policy → PreToolUse</text>
+  <text x="855" y="449" class="body center">Pydantic 校验 + 权限决策</text><text x="855" y="468" class="small center">Policy 先执行；Hook 只能收紧</text>
+  <text x="1125" y="425" class="cardTitle center">Tool Executor</text>
+  <text x="1125" y="449" class="body center">只读并发；写操作逐文件加锁</text><text x="1125" y="468" class="small center">跨 Agent OS 锁 + 原子替换</text>
+  <text x="1388" y="425" class="cardTitle center">Tool Result / Evidence</text>
+  <text x="1388" y="449" class="body center">结果回填 messages</text><text x="1388" y="468" class="small center">大输出存文件 + SHA-256 引用</text>
+  <path d="M263 439 H290" class="flowBlue"/><path d="M488 439 H515" class="flowBlue"/>
+  <path d="M703 439 H730" class="flowBlue"/><path d="M973 439 H1000" class="flowBlue"/>
+  <path d="M1243 439 H1270" class="flowBlue"/>
+  <path d="M1388 482 V505 H170 V490" class="flowBlue dash"/>
+
+  <!-- control plane -->
+  <rect x="78" y="527" width="420" height="105" rx="12" fill="#fff4e8" stroke="#ea580c" stroke-width="1.8"/>
+  <text x="98" y="556" class="cardTitle" fill="#9a3412">运行中用户控制</text>
+  <rect x="98" y="570" width="72" height="27" rx="6" fill="#fff" stroke="#ea580c"/><text x="134" y="588" class="tag center" fill="#c2410c">/plan</text>
+  <rect x="180" y="570" width="82" height="27" rx="6" fill="#fff" stroke="#ea580c"/><text x="221" y="588" class="tag center" fill="#c2410c">/steer</text>
+  <rect x="272" y="570" width="74" height="27" rx="6" fill="#fff" stroke="#ea580c"/><text x="309" y="588" class="tag center" fill="#c2410c">/next</text>
+  <rect x="356" y="570" width="112" height="27" rx="6" fill="#fff" stroke="#ea580c"/><text x="412" y="588" class="tag center" fill="#c2410c">/interrupt</text>
+  <text x="98" y="617" class="small">SteeringInbox 持久化；模型调用中到达时取消尚未执行的旧工具</text>
+
+  <rect x="525" y="527" width="305" height="105" rx="12" fill="#fff" stroke="#ea580c" stroke-width="1.8"/>
+  <text x="545" y="556" class="cardTitle">PlanManager（JSONL）</text>
+  <text x="545" y="579" class="body">v1 active → v2 superseded → v3 active</text>
+  <text x="545" y="603" class="small">最多一个 in_progress；未完成计划阻止 Stop</text>
+  <path d="M498 579 H517" class="flowOrange"/>
+  <path d="M677 527 V495" class="flowOrange"/>
+
+  <rect x="857" y="527" width="641" height="105" rx="12" fill="#fff4e8" stroke="#ea580c" stroke-width="1.8"/>
+  <text x="877" y="556" class="cardTitle">BackgroundTaskManager — 耗时验证放后台，Agent Loop 继续响应</text>
+  <text x="877" y="581" class="body">仅允许 TaskContract 中的精确验证命令；asyncio 子进程，无 Shell 字符串</text>
+  <text x="877" y="605" class="small">start → running Job 持久化 → 完成/超时 → TaskNotification 在下一安全边界注入</text>
+  <path d="M1125 482 V519" class="flowOrange"/>
+  <path d="M1498 579 H1514 V505 H1455 V490" class="flowOrange dash"/>
+
+  <!-- tool boundary -->
+  <rect x="78" y="657" width="850" height="86" rx="12" fill="#fff" stroke="#9ab1c9"/>
+  <text x="98" y="684" class="cardTitle">模型可用工具（合同白名单）</text>
+  <rect x="98" y="699" width="192" height="26" rx="6" fill="#eaf2ff" stroke="#2563eb"/><text x="194" y="717" class="tag center" fill="#1d4ed8">read / list / search（并发）</text>
+  <rect x="302" y="699" width="188" height="26" rx="6" fill="#fff4e8" stroke="#ea580c"/><text x="396" y="717" class="tag center" fill="#c2410c">patch / create（文件锁）</text>
+  <rect x="502" y="699" width="190" height="26" rx="6" fill="#edf9f0" stroke="#16a34a"/><text x="597" y="717" class="tag center" fill="#15803d">精确验证命令</text>
+  <rect x="704" y="699" width="202" height="26" rx="6" fill="#f8fafc" stroke="#64748b"/><text x="805" y="717" class="tag center" fill="#475569">update_plan / submit_result</text>
+
+  <rect x="955" y="657" width="543" height="86" rx="12" fill="#fff0f0" stroke="#dc2626" stroke-width="1.5"/>
+  <text x="975" y="684" class="cardTitle" fill="#991b1b">模型明确不可用</text>
+  <text x="975" y="711" class="body" fill="#b91c1c">Git push　·　Teambition 写入　·　测试部署　·　生产发布</text>
+  <text x="975" y="730" class="small">这些副作用只属于确定性 DeliveryWorkflow 或外部人工系统</text>
+
+  <!-- Stop Gate to workflow -->
+  <path d="M1414 294 V319" class="flowBlue"/>
+  <path d="M1498 439 H1540 V770 H1388 V778" class="flowGreen"/>
+  <rect x="1050" y="786" width="448" height="70" rx="12" fill="#edf9f0" stroke="#16a34a" stroke-width="2" filter="url(#shadow)"/>
+  <text x="1274" y="812" class="cardTitle center">Deterministic Stop Gate</text>
+  <text x="1274" y="834" class="body center">计划完成 + submit_result + 验证发生在最后一次修改之后</text>
+  <text x="1274" y="851" class="small center">不满足 → 回到 Agent Loop；满足 → 进入确定性交付</text>
+
+  <!-- Delivery workflow -->
+  <text x="52" y="840" class="section">③ 测试交付、审批与恢复</text>
+  <g filter="url(#shadow)">
+    <rect x="52" y="875" width="188" height="82" rx="12" fill="#f8fafc" stroke="#475569" stroke-width="1.6"/>
+    <rect x="266" y="875" width="188" height="82" rx="12" fill="#edf9f0" stroke="#16a34a" stroke-width="1.7"/>
+    <rect x="480" y="875" width="188" height="82" rx="12" fill="#edf9f0" stroke="#16a34a" stroke-width="1.7"/>
+    <rect x="694" y="875" width="205" height="82" rx="12" fill="#f8fafc" stroke="#475569" stroke-width="1.6"/>
+    <path d="M1030 875 L1120 916 L1030 957 L940 916 Z" fill="#fff0f0" stroke="#dc2626" stroke-width="1.8"/>
+    <rect x="1161" y="875" width="165" height="82" rx="12" fill="#f8fafc" stroke="#475569" stroke-width="1.6"/>
+    <rect x="1352" y="875" width="175" height="82" rx="12" fill="#f8fafc" stroke="#475569" stroke-width="1.6"/>
+  </g>
+  <text x="146" y="905" class="cardTitle center">Change Snapshot</text><text x="146" y="929" class="body center">规范化差异哈希</text><text x="146" y="947" class="small center">绑定 baseline</text>
+  <text x="360" y="905" class="cardTitle center">测试环境部署</text><text x="360" y="929" class="body center">幂等 publish</text><text x="360" y="947" class="small center">仅 Test target</text>
+  <text x="574" y="905" class="cardTitle center">浏览器验证</text><text x="574" y="929" class="body center">Playwright / Evidence</text><text x="574" y="947" class="small center">失败进入回滚</text>
+  <text x="796" y="905" class="cardTitle center">Approval Package</text><text x="796" y="929" class="body center">合同 + 代码 + 测试证据</text><text x="796" y="947" class="small center">统一 subject_hash</text>
+  <text x="1030" y="910" class="cardTitle center" fill="#991b1b">人工审批</text><text x="1030" y="931" class="small center">hash 必须匹配</text>
+  <text x="1243" y="905" class="cardTitle center">候选分支</text><text x="1243" y="929" class="body center">Git push</text><text x="1243" y="947" class="small center">不 merge / 不 force</text>
+  <text x="1439" y="905" class="cardTitle center">TB 转测试</text><text x="1439" y="929" class="body center">幂等写回</text><text x="1439" y="947" class="small center">完成闭环</text>
+  <path d="M240 916 H258" class="flow"/><path d="M454 916 H472" class="flowGreen"/>
+  <path d="M668 916 H686" class="flowGreen"/><path d="M899 916 H932" class="flow"/>
+  <path d="M1120 916 H1153" class="flow"/><path d="M1326 916 H1344" class="flow"/>
+  <text x="1136" y="904" class="tag" fill="#15803d">批准</text>
+  <path d="M1274 856 V865 H146 V867" class="flowGreen"/>
+
+  <!-- rollback and resume lanes -->
+  <rect x="52" y="989" width="847" height="92" rx="12" fill="#f8fafc" stroke="#64748b"/>
+  <text x="76" y="1019" class="cardTitle">Checkpoint Resume（崩溃恢复 / 人工重试）</text>
+  <text x="76" y="1044" class="body">从最近稳定阶段恢复；已保存的 Agent、差异、部署、验证、审批包和 Git 回执不会重复计算</text>
+  <text x="76" y="1067" class="small">外部副作用复用稳定 idempotency key；运行中后台 Job 在重启后明确标记 interrupted</text>
+  <path d="M655 989 V973 H653 V965" class="flow dash"/>
+
+  <rect x="926" y="989" width="287" height="92" rx="12" fill="#fff4e8" stroke="#ea580c" stroke-width="1.5"/>
+  <text x="1069" y="1019" class="cardTitle center">拒绝 / 验证失败</text>
+  <text x="1069" y="1044" class="body center">测试环境 rollback</text>
+  <text x="1069" y="1067" class="small center">回滚同样持久化幂等键和事件</text>
+  <path d="M1030 957 V981" class="flowOrange"/>
+
+  <rect x="1240" y="989" width="287" height="92" rx="12" fill="#fff0f0" stroke="#dc2626" stroke-width="2"/>
+  <text x="1383" y="1019" class="cardTitle center" fill="#991b1b">生产发布：系统边界之外</text>
+  <text x="1383" y="1044" class="body center" fill="#b91c1c">独立身份 + 独立人工审批</text>
+  <text x="1383" y="1067" class="small center">Coding Agent 永远不能自动执行</text>
+  <path d="M1439 957 V981" class="flow dash" style="stroke:#dc2626;marker-end:url(#arrow)"/>
+
+  <text x="800" y="1116" class="small center">当前实现：单 Agent；未来多 Agent 可替换 CodingSession 调度层，不改变 TaskContract、Policy、Stop Gate 与 DeliveryWorkflow 边界</text>
+</svg>
