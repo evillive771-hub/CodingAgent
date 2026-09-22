@@ -14,6 +14,7 @@ class ChatModel(BaseModel):
 class ChatTurn(ChatModel):
     turn_number: int = Field(ge=1)
     run_id: str = Field(min_length=1, max_length=128)
+    origin_run_id: str | None = Field(default=None, min_length=1, max_length=128)
     user_message: str = Field(min_length=1, max_length=20000)
     assistant_message: str = Field(min_length=1, max_length=20000)
     status: AgentStatus

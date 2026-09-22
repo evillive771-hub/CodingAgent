@@ -8,7 +8,14 @@ import httpx
 
 from aicoding_agent.config import ModelSettings
 from aicoding_agent.domain.models import ModelResponse, ToolCall
-from aicoding_agent.model.base import ModelError, ModelProtocolError
+from aicoding_agent.model.base import (
+    ModelAuthenticationError,
+    ModelPromptTooLongError,
+    ModelProtocolError,
+    ModelRateLimitError,
+    ModelRequestError,
+    ModelTransientError,
+)
 
 
 class MimoChatModel:
@@ -54,20 +61,33 @@ class MimoChatModel:
                 )
             except httpx.HTTPError as exc:
                 if attempt >= self._settings.max_retries:
-                    raise ModelError(f"MiMo request failed: {type(exc).__name__}") from exc
+                    raise ModelTransientError(f"MiMo request failed: {type(exc).__name__}") from exc
                 await asyncio.sleep(0.5 * (2**attempt))
                 continue
 
             if response.status_code < 400:
                 break
+            if response.status_code in {401, 403}:
+                raise ModelAuthenticationError(
+                    f"MiMo rejected model credentials: HTTP {response.status_code}"
+                )
             if response.status_code not in {408, 429, 500, 502, 503, 504}:
-                raise ModelError(f"MiMo returned HTTP {response.status_code}")
+                if response.status_code in {400, 413} and _is_prompt_too_long(response):
+                    raise ModelPromptTooLongError(
+                        f"MiMo rejected an oversized prompt: HTTP {response.status_code}"
+                    )
+                raise ModelRequestError(f"MiMo returned HTTP {response.status_code}")
             if attempt >= self._settings.max_retries:
-                raise ModelError(f"MiMo remained unavailable: HTTP {response.status_code}")
+                if response.status_code == 429:
+                    raise ModelRateLimitError(
+                        "MiMo remained rate limited: HTTP 429",
+                        retry_after_seconds=_retry_after_seconds(response),
+                    )
+                raise ModelTransientError(f"MiMo remained unavailable: HTTP {response.status_code}")
             await asyncio.sleep(0.5 * (2**attempt))
 
         if response is None:
-            raise ModelError("MiMo request did not produce a response")
+            raise ModelTransientError("MiMo request did not produce a response")
 
         try:
             body = response.json()
@@ -111,3 +131,32 @@ class MimoChatModel:
     async def aclose(self) -> None:
         if self._owns_client:
             await self._client.aclose()
+
+
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    raw = response.headers.get("retry-after")
+    if raw is None:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    return value if 0 <= value <= 300 else None
+
+
+def _is_prompt_too_long(response: httpx.Response) -> bool:
+    try:
+        payload = response.json()
+    except ValueError:
+        return False
+    text = json.dumps(payload, ensure_ascii=False).casefold()
+    return any(
+        marker in text
+        for marker in (
+            "context_length_exceeded",
+            "maximum context length",
+            "prompt is too long",
+            "prompt too long",
+            "context window",
+        )
+    )

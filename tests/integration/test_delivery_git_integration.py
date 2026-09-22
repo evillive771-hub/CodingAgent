@@ -92,6 +92,7 @@ async def test_delivery_workflow_publishes_approved_isolated_change(tmp_path: Pa
         objective="Deliver an approved isolated change",
         acceptance_criteria=["Candidate branch contains the Agent change"],
         base_revision=baseline,
+        repository_url=str(remote),
         target_environment="test",
     )
 
@@ -112,6 +113,10 @@ async def test_delivery_workflow_publishes_approved_isolated_change(tmp_path: Pa
     checkpoint = await checkpoints.load("delivery-run")
     assert checkpoint is not None
     receipt = checkpoint["publish_receipt"]
+    assert (
+        checkpoint["approval_package"]["subject"]["task"]["repository_url"]
+        == str(remote)
+    )
     assert completed.stage == "completed"
     assert completed.workspace_released is True
     assert not agent.workspace.exists()

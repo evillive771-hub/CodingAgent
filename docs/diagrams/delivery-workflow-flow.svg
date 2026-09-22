@@ -1,0 +1,122 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1250" viewBox="0 0 1920 1250">
+  <defs>
+    <linearGradient id="header" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#17345f"/>
+      <stop offset="0.62" stop-color="#176f91"/>
+      <stop offset="1" stop-color="#0f9a98"/>
+    </linearGradient>
+    <filter id="shadow" x="-15%" y="-15%" width="130%" height="145%">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#17345f" flood-opacity="0.11"/>
+    </filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#52657a"/></marker>
+    <marker id="arrowBlue" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#2563eb"/></marker>
+    <marker id="arrowGreen" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#16a34a"/></marker>
+    <marker id="arrowOrange" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#ea580c"/></marker>
+    <marker id="arrowRed" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#dc2626"/></marker>
+    <style>
+      .title{font:700 34px 'Microsoft YaHei','Segoe UI',sans-serif;fill:#fff}.subtitle{font:400 16px 'Microsoft YaHei','Segoe UI',sans-serif;fill:#d9f3f5}
+      .section{font:700 22px 'Microsoft YaHei','Segoe UI',sans-serif;fill:#17345f}.cardTitle{font:700 17px 'Microsoft YaHei','Segoe UI',sans-serif;fill:#183153}
+      .state{font:700 15px Consolas,'Microsoft YaHei',sans-serif;fill:#183153}.body{font:400 13px 'Microsoft YaHei','Segoe UI',sans-serif;fill:#52657a}
+      .small{font:400 12px 'Microsoft YaHei','Segoe UI',sans-serif;fill:#64748b}.tag{font:600 12px 'Microsoft YaHei','Segoe UI',sans-serif}
+      .blue{fill:#2563eb}.green{fill:#15803d}.orange{fill:#c2410c}.red{fill:#b91c1c}.teal{fill:#0f766e}
+    </style>
+  </defs>
+  <rect width="1920" height="1250" fill="#f6f8fb"/>
+  <rect x="18" y="18" width="1884" height="1214" rx="22" fill="#fff" stroke="#d9e2ef"/>
+  <path d="M18 40Q18 18 40 18H1880Q1902 18 1902 40V112H18Z" fill="url(#header)"/>
+  <text x="960" y="62" text-anchor="middle" class="title">DeliveryWorkflow — 外层确定性交付流程</text>
+  <text x="960" y="92" text-anchor="middle" class="subtitle">确定性状态机控制交付；Agent Harness 作为 CODING 阶段中的一个节点</text>
+
+  <rect x="55" y="137" width="16" height="16" rx="3" fill="#f8fafc" stroke="#64748b"/><text x="81" y="150" class="small">确定性宿主阶段</text>
+  <rect x="220" y="137" width="16" height="16" rx="3" fill="#eef4ff" stroke="#2563eb"/><text x="246" y="150" class="small">Agent 节点</text>
+  <rect x="355" y="137" width="16" height="16" rx="3" fill="#effcf4" stroke="#16a34a"/><text x="381" y="150" class="small">成功 / 验证</text>
+  <rect x="505" y="137" width="16" height="16" rx="3" fill="#fff7ed" stroke="#ea580c"/><text x="531" y="150" class="small">审批 / 外部动作</text>
+  <rect x="677" y="137" width="16" height="16" rx="3" fill="#fff1f2" stroke="#dc2626"/><text x="703" y="150" class="small">失败 / 回滚</text>
+  <line x1="835" y1="145" x2="885" y2="145" stroke="#64748b" stroke-width="2" stroke-dasharray="7 6"/><text x="898" y="150" class="small">可选或当前阶段未启用</text>
+
+  <text x="55" y="202" class="section">① 入口与运行边界</text>
+  <rect x="55" y="221" width="1810" height="116" rx="16" fill="#fbfcfe" stroke="#d8e1ed"/>
+  <rect x="85" y="244" width="360" height="70" rx="12" fill="#fff" stroke="#64748b" filter="url(#shadow)"/>
+  <text x="265" y="270" text-anchor="middle" class="cardTitle">输入</text><text x="265" y="294" text-anchor="middle" class="body">TaskContract · Repository · DeliveryConfig</text>
+  <path d="M445 279H515" stroke="#52657a" stroke-width="2.4" fill="none" marker-end="url(#arrow)"/>
+  <rect x="525" y="240" width="470" height="78" rx="12" fill="#f8fafc" stroke="#64748b" stroke-width="1.7" filter="url(#shadow)"/>
+  <text x="760" y="267" text-anchor="middle" class="cardTitle">DeliveryWorkflow.execute() / resume()</text>
+  <text x="760" y="294" text-anchor="middle" class="body">仅允许 test 目标 · run_id · 设备锁 · 可恢复 checkpoint</text>
+  <path d="M995 279H1065" stroke="#52657a" stroke-width="2.4" fill="none" marker-end="url(#arrow)"/>
+  <rect x="1075" y="240" width="750" height="78" rx="12" fill="#effcf4" stroke="#16a34a" stroke-width="1.7" filter="url(#shadow)"/>
+  <text x="1450" y="267" text-anchor="middle" class="cardTitle">控制边界</text>
+  <text x="1450" y="294" text-anchor="middle" class="body">状态迁移、测试发布、审批、回滚由宿主执行；发布工具不暴露给模型</text>
+
+  <text x="55" y="383" class="section">② 主状态机</text>
+  <rect x="55" y="402" width="1810" height="495" rx="18" fill="#fbfcfe" stroke="#d8e1ed"/>
+
+  <rect x="82" y="446" width="210" height="96" rx="14" fill="#fff" stroke="#64748b" stroke-width="1.7" filter="url(#shadow)"/>
+  <text x="187" y="476" text-anchor="middle" class="state">CREATED</text><text x="187" y="505" text-anchor="middle" class="body">创建运行记录</text><text x="187" y="526" text-anchor="middle" class="small">workflow.created</text>
+  <path d="M292 494H342" stroke="#52657a" stroke-width="2.4" fill="none" marker-end="url(#arrow)"/>
+  <rect x="352" y="436" width="286" height="116" rx="14" fill="#fff" stroke="#64748b" stroke-width="1.7" filter="url(#shadow)"/>
+  <text x="495" y="468" text-anchor="middle" class="state">PREPARING_WORKSPACE</text><text x="495" y="496" text-anchor="middle" class="body">创建隔离 worktree</text><text x="495" y="519" text-anchor="middle" class="body">冻结 workspace lease</text><text x="495" y="540" text-anchor="middle" class="small">LocalGitWorktreeManager</text>
+  <path d="M638 494H688" stroke="#52657a" stroke-width="2.4" fill="none" marker-end="url(#arrow)"/>
+
+  <rect x="698" y="420" width="398" height="148" rx="16" fill="#eef4ff" stroke="#2563eb" stroke-width="2.6" filter="url(#shadow)"/>
+  <rect x="727" y="442" width="340" height="28" rx="14" fill="#2563eb"/><text x="897" y="461" text-anchor="middle" class="tag" fill="#fff">内层节点 · 详细见图 2</text>
+  <text x="897" y="502" text-anchor="middle" class="state">CODING</text>
+  <text x="897" y="529" text-anchor="middle" class="cardTitle">Agent Harness / AgentLoop</text>
+  <text x="897" y="552" text-anchor="middle" class="small">输入冻结合同与工作区 → 返回 AgentResult</text>
+  <path d="M1096 494H1146" stroke="#2563eb" stroke-width="2.6" fill="none" marker-end="url(#arrowBlue)"/>
+  <rect x="1156" y="436" width="296" height="116" rx="14" fill="#fff" stroke="#64748b" stroke-width="1.7" filter="url(#shadow)"/>
+  <text x="1304" y="468" text-anchor="middle" class="state">INSPECTING_CHANGES</text><text x="1304" y="499" text-anchor="middle" class="body">GitChangeInspector.snapshot()</text><text x="1304" y="523" text-anchor="middle" class="body">冻结 change_hash</text>
+  <path d="M1452 494H1506V620H1462" stroke="#52657a" stroke-width="2.4" fill="none" marker-end="url(#arrow)"/>
+
+  <rect x="1210" y="574" width="252" height="92" rx="14" fill="#fff" stroke="#64748b" stroke-width="1.7" filter="url(#shadow)"/>
+  <text x="1336" y="604" text-anchor="middle" class="state">BUILDING</text><text x="1336" y="632" text-anchor="middle" class="body">ControlledArtifactBuilder</text><text x="1336" y="652" text-anchor="middle" class="small">无 builder 时跳过</text>
+  <path d="M1210 620H1158" stroke="#52657a" stroke-width="2.4" fill="none" marker-end="url(#arrow)"/>
+  <rect x="906" y="574" width="252" height="92" rx="14" fill="#fff7ed" stroke="#ea580c" stroke-width="1.7" filter="url(#shadow)"/>
+  <text x="1032" y="604" text-anchor="middle" class="state">TEST_DEPLOYING</text><text x="1032" y="632" text-anchor="middle" class="body">测试环境发布</text><text x="1032" y="652" text-anchor="middle" class="small">幂等键 + deployment receipt</text>
+  <path d="M906 620H854" stroke="#ea580c" stroke-width="2.4" fill="none" marker-end="url(#arrowOrange)"/>
+  <rect x="602" y="574" width="252" height="92" rx="14" fill="#effcf4" stroke="#16a34a" stroke-width="1.7" filter="url(#shadow)"/>
+  <text x="728" y="604" text-anchor="middle" class="state">TEST_VERIFYING</text><text x="728" y="632" text-anchor="middle" class="body">BrowserVerifier.verify()</text><text x="728" y="652" text-anchor="middle" class="small">失败时触发回滚</text>
+  <path d="M602 620H550" stroke="#16a34a" stroke-width="2.4" fill="none" marker-end="url(#arrowGreen)"/>
+  <rect x="250" y="566" width="300" height="108" rx="14" fill="#fff7ed" stroke="#ea580c" stroke-width="2" filter="url(#shadow)"/>
+  <text x="400" y="597" text-anchor="middle" class="state">AWAITING_APPROVAL</text><text x="400" y="626" text-anchor="middle" class="body">冻结合同、变更与测试证据</text><text x="400" y="651" text-anchor="middle" class="small">人工决定必须匹配 subject_hash</text>
+
+  <path d="M350 674V732H194" stroke="#16a34a" stroke-width="2.5" fill="none" marker-end="url(#arrowGreen)"/><text x="248" y="716" class="tag green">批准 · 当前阶段一</text>
+  <rect x="72" y="744" width="244" height="88" rx="14" fill="#effcf4" stroke="#16a34a" stroke-width="2" filter="url(#shadow)"/>
+  <text x="194" y="778" text-anchor="middle" class="state">COMPLETED</text><text x="194" y="807" text-anchor="middle" class="body">释放成功工作区</text>
+
+  <path d="M450 674V724H683V736" stroke="#64748b" stroke-width="2" stroke-dasharray="7 6" fill="none" marker-end="url(#arrow)"/><text x="515" y="717" class="tag orange">批准 · 通用可选分支</text>
+  <rect x="545" y="744" width="276" height="88" rx="14" fill="#fff7ed" stroke="#ea580c" stroke-width="1.8" stroke-dasharray="7 5" filter="url(#shadow)"/>
+  <text x="683" y="776" text-anchor="middle" class="state">FINALIZING</text><text x="683" y="801" text-anchor="middle" class="body">复核 hash · Git publish · Teambition</text><text x="683" y="821" text-anchor="middle" class="small">deliver-phase-one 当前关闭</text>
+  <path d="M545 788H326" stroke="#64748b" stroke-width="2" stroke-dasharray="7 6" fill="none" marker-end="url(#arrow)"/>
+
+  <path d="M500 674V690H1080V736" stroke="#dc2626" stroke-width="2.4" fill="none" marker-end="url(#arrowRed)"/><text x="800" y="684" class="tag red">拒绝 / 部署后失败 / 审批后工作区变化</text>
+  <rect x="948" y="744" width="264" height="88" rx="14" fill="#fff1f2" stroke="#dc2626" stroke-width="2" filter="url(#shadow)"/>
+  <text x="1080" y="778" text-anchor="middle" class="state">ROLLING_BACK</text><text x="1080" y="807" text-anchor="middle" class="body">测试环境幂等回滚</text>
+  <path d="M1212 788H1270" stroke="#dc2626" stroke-width="2.4" fill="none" marker-end="url(#arrowRed)"/>
+  <rect x="1280" y="744" width="230" height="88" rx="14" fill="#fff1f2" stroke="#dc2626" stroke-width="1.8" filter="url(#shadow)"/>
+  <text x="1395" y="778" text-anchor="middle" class="state">ROLLED_BACK</text><text x="1395" y="807" text-anchor="middle" class="body">回滚成功，终态</text>
+
+  <rect x="1550" y="650" width="270" height="182" rx="14" fill="#fff1f2" stroke="#dc2626" stroke-width="1.8" filter="url(#shadow)"/>
+  <text x="1685" y="682" text-anchor="middle" class="state">FAILED</text>
+  <text x="1685" y="712" text-anchor="middle" class="body">部署前任一阶段失败</text>
+  <text x="1685" y="738" text-anchor="middle" class="body">或回滚自身失败</text>
+  <line x1="1580" y1="758" x2="1790" y2="758" stroke="#fecaca"/>
+  <text x="1685" y="785" text-anchor="middle" class="small">保留失败证据</text>
+  <text x="1685" y="807" text-anchor="middle" class="small">工作区可显式 cleanup</text>
+  <path d="M1452 526H1685V642" stroke="#dc2626" stroke-width="1.9" stroke-dasharray="7 6" fill="none" marker-end="url(#arrowRed)"/><text x="1515" y="516" class="small red">早期异常</text>
+  <path d="M1080 832V858H1685V840" stroke="#dc2626" stroke-width="1.9" stroke-dasharray="7 6" fill="none" marker-end="url(#arrowRed)"/><text x="1330" y="854" class="small red">rollback failed</text>
+
+  <text x="55" y="945" class="section">③ 每一步都可恢复、可审计</text>
+  <rect x="55" y="965" width="1810" height="150" rx="18" fill="#ecfeff" stroke="#0891b2" stroke-width="1.8"/>
+  <rect x="90" y="992" width="390" height="94" rx="12" fill="#fff" stroke="#0891b2"/>
+  <text x="285" y="1022" text-anchor="middle" class="cardTitle">Atomic checkpoint</text><text x="285" y="1050" text-anchor="middle" class="body">保存 WorkflowRun 与当前 stage</text><text x="285" y="1072" text-anchor="middle" class="small">resume(run_id) 从确定位置继续</text>
+  <rect x="535" y="992" width="390" height="94" rx="12" fill="#fff" stroke="#0891b2"/>
+  <text x="730" y="1022" text-anchor="middle" class="cardTitle">Append-only events</text><text x="730" y="1050" text-anchor="middle" class="body">workflow.* 事件按 run_id 顺序记录</text><text x="730" y="1072" text-anchor="middle" class="small">状态、失败原因、清理结果</text>
+  <rect x="980" y="992" width="390" height="94" rx="12" fill="#fff" stroke="#0891b2"/>
+  <text x="1175" y="1022" text-anchor="middle" class="cardTitle">Evidence receipts</text><text x="1175" y="1050" text-anchor="middle" class="body">change · build · deployment · browser</text><text x="1175" y="1072" text-anchor="middle" class="small">审批包绑定 subject_hash</text>
+  <rect x="1425" y="992" width="400" height="94" rx="12" fill="#fff" stroke="#0891b2"/>
+  <text x="1625" y="1022" text-anchor="middle" class="cardTitle">Workspace lifecycle</text><text x="1625" y="1050" text-anchor="middle" class="body">成功后释放 lease；失败现场默认保留</text><text x="1625" y="1072" text-anchor="middle" class="small">终态后可显式 cleanup_workspace()</text>
+  <path d="M960 897V955" stroke="#0891b2" stroke-width="2" stroke-dasharray="6 5" fill="none" marker-end="url(#arrow)"/>
+
+  <rect x="55" y="1150" width="1810" height="47" rx="10" fill="#eef4ff" stroke="#93b4f9"/>
+  <text x="960" y="1179" text-anchor="middle" class="body">边界：Agent Harness 只负责产出结构化 AgentResult；后续变更检查、构建、部署、审批与回滚均由 DeliveryWorkflow 决定。</text>
+</svg>

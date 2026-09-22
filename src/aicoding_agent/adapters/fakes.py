@@ -6,9 +6,12 @@ from pathlib import Path
 from uuid import uuid4
 
 from aicoding_agent.adapters.ports import (
+    ArtifactEntry,
+    BuildReceipt,
     ChangeSnapshot,
     DeploymentReceipt,
     PublishReceipt,
+    RollbackReceipt,
     TicketSnapshot,
     VerificationReport,
     WorkspaceLease,
@@ -109,14 +112,20 @@ class FakeTestEnvironmentPublisher:
         contract: TaskContract,
         *,
         change_hash: str,
+        build_receipt: BuildReceipt | None = None,
         idempotency_key: str,
     ) -> DeploymentReceipt:
         if self.fail_publish:
             raise RuntimeError("Fake test deployment failed")
         receipt = DeploymentReceipt(
             deployment_id=uuid4().hex,
-            artifact_hash=hashlib.sha256(change_hash.encode()).hexdigest(),
+            artifact_hash=(
+                build_receipt.artifact_hash
+                if build_receipt is not None
+                else hashlib.sha256(change_hash.encode()).hexdigest()
+            ),
             location=f"fake://test/{contract.task_id}",
+            manifest_ref=build_receipt.manifest_ref if build_receipt else None,
         )
         self.published.append(receipt)
         return receipt
@@ -126,10 +135,40 @@ class FakeTestEnvironmentPublisher:
         receipt: DeploymentReceipt,
         *,
         idempotency_key: str,
-    ) -> None:
+    ) -> RollbackReceipt:
         if self.fail_rollback:
             raise RuntimeError("Fake rollback failed")
         self.rolled_back.append(receipt.deployment_id)
+        return RollbackReceipt(
+            rollback_id=idempotency_key,
+            deployment_id=receipt.deployment_id,
+            ok=True,
+            evidence_refs=[f"fake://rollback/{receipt.deployment_id}"],
+        )
+
+
+class FakeArtifactBuilder:
+    def __init__(self) -> None:
+        self.receipts: list[BuildReceipt] = []
+
+    async def build(
+        self,
+        workspace: Path,
+        contract: TaskContract,
+        *,
+        change_hash: str,
+        idempotency_key: str,
+    ) -> BuildReceipt:
+        artifact_hash = hashlib.sha256(change_hash.encode()).hexdigest()
+        receipt = BuildReceipt(
+            build_id=idempotency_key,
+            artifact_hash=artifact_hash,
+            artifact_root=str(workspace),
+            manifest_ref=f"fake://manifest/{artifact_hash}",
+            artifacts=[ArtifactEntry(path="dist/index.html", size=1, sha256="0" * 64)],
+        )
+        self.receipts.append(receipt)
+        return receipt
 
 
 class FakeBrowserVerifier:

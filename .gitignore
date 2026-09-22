@@ -14,6 +14,10 @@ build/
 .env
 .env.local
 env.txt
+examples/phase1/delivery.json
+examples/phase1/delivery.server.json
+examples/phase1/task.json
 artifacts/
 .aicoding-agent/
 /runtime/
+.workbuddy-ai/

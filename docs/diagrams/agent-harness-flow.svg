@@ -1,0 +1,129 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1450" viewBox="0 0 1920 1450">
+  <defs>
+    <linearGradient id="header" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#17345f"/><stop offset="0.62" stop-color="#176f91"/><stop offset="1" stop-color="#0f9a98"/></linearGradient>
+    <filter id="shadow" x="-15%" y="-15%" width="130%" height="145%"><feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#17345f" flood-opacity="0.11"/></filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#52657a"/></marker>
+    <marker id="arrowBlue" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#2563eb"/></marker>
+    <marker id="arrowGreen" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#16a34a"/></marker>
+    <marker id="arrowOrange" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#ea580c"/></marker>
+    <marker id="arrowRed" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#dc2626"/></marker>
+    <style>
+      .title{font:700 34px 'Microsoft YaHei','Segoe UI',sans-serif;fill:#fff}.subtitle{font:400 16px 'Microsoft YaHei','Segoe UI',sans-serif;fill:#d9f3f5}
+      .section{font:700 22px 'Microsoft YaHei','Segoe UI',sans-serif;fill:#17345f}.cardTitle{font:700 17px 'Microsoft YaHei','Segoe UI',sans-serif;fill:#183153}
+      .mono{font:700 14px Consolas,'Microsoft YaHei',sans-serif;fill:#183153}.body{font:400 13px 'Microsoft YaHei','Segoe UI',sans-serif;fill:#52657a}
+      .small{font:400 12px 'Microsoft YaHei','Segoe UI',sans-serif;fill:#64748b}.micro{font:400 11px 'Microsoft YaHei','Segoe UI',sans-serif;fill:#64748b}
+      .tag{font:600 12px 'Microsoft YaHei','Segoe UI',sans-serif}.blue{fill:#2563eb}.green{fill:#15803d}.orange{fill:#c2410c}.red{fill:#b91c1c}.teal{fill:#0f766e}
+    </style>
+  </defs>
+  <rect width="1920" height="1450" fill="#f6f8fb"/>
+  <rect x="18" y="18" width="1884" height="1414" rx="22" fill="#fff" stroke="#d9e2ef"/>
+  <path d="M18 40Q18 18 40 18H1880Q1902 18 1902 40V112H18Z" fill="url(#header)"/>
+  <text x="960" y="62" text-anchor="middle" class="title">Agent Harness — AgentLoop 内部展开</text>
+  <text x="960" y="92" text-anchor="middle" class="subtitle">接收冻结 TaskContract 与 workspace，在受控模型—工具循环中产出结构化 AgentResult</text>
+
+  <rect x="55" y="137" width="16" height="16" rx="3" fill="#eef4ff" stroke="#2563eb"/><text x="81" y="150" class="small">模型 / Agent</text>
+  <rect x="198" y="137" width="16" height="16" rx="3" fill="#f8fafc" stroke="#64748b"/><text x="224" y="150" class="small">确定性宿主</text>
+  <rect x="345" y="137" width="16" height="16" rx="3" fill="#fff7ed" stroke="#ea580c"/><text x="371" y="150" class="small">Policy / Hook / 控制</text>
+  <rect x="535" y="137" width="16" height="16" rx="3" fill="#effcf4" stroke="#16a34a"/><text x="561" y="150" class="small">验证 / 完成</text>
+  <rect x="678" y="137" width="16" height="16" rx="3" fill="#fff1f2" stroke="#dc2626"/><text x="704" y="150" class="small">阻断 / 失败</text>
+  <line x1="830" y1="145" x2="880" y2="145" stroke="#2563eb" stroke-width="2" stroke-dasharray="7 6"/><text x="892" y="150" class="small">循环或可选分支</text>
+
+  <text x="55" y="202" class="section">① Workflow 传入边界与运行时组装</text>
+  <rect x="55" y="221" width="1810" height="150" rx="16" fill="#fbfcfe" stroke="#d8e1ed"/>
+  <rect x="82" y="249" width="320" height="92" rx="13" fill="#fff" stroke="#64748b" filter="url(#shadow)"/>
+  <text x="242" y="278" text-anchor="middle" class="cardTitle">冻结输入</text><text x="242" y="306" text-anchor="middle" class="body">TaskContract · workspace · run_id</text><text x="242" y="328" text-anchor="middle" class="small">conversation / resume messages</text>
+  <path d="M402 295H457" stroke="#52657a" stroke-width="2.4" fill="none" marker-end="url(#arrow)"/>
+  <rect x="467" y="241" width="590" height="108" rx="13" fill="#f8fafc" stroke="#64748b" stroke-width="1.6" filter="url(#shadow)"/>
+  <text x="762" y="271" text-anchor="middle" class="cardTitle">ContextBuilder / ToolContext</text>
+  <text x="762" y="299" text-anchor="middle" class="body">System Prompt · AGENTS.md · 合同 · 历史 / Notes · Skill Catalog</text>
+  <text x="762" y="324" text-anchor="middle" class="body">Plan · Task DAG · Control · Background · Memory · Permission</text>
+  <path d="M1057 295H1112" stroke="#52657a" stroke-width="2.4" fill="none" marker-end="url(#arrow)"/>
+  <rect x="1122" y="241" width="700" height="108" rx="13" fill="#fff7ed" stroke="#ea580c" stroke-width="1.6" filter="url(#shadow)"/>
+  <text x="1472" y="271" text-anchor="middle" class="cardTitle">启动门</text>
+  <text x="1472" y="299" text-anchor="middle" class="body">UserPromptSubmit Hook → 载入 / 初始化消息 → 注入工具白名单</text>
+  <text x="1472" y="324" text-anchor="middle" class="small">Hook 或 Skill Catalog 初始化失败 → AgentStatus.failed</text>
+
+  <text x="55" y="417" class="section">② AgentLoop 主循环</text>
+  <rect x="55" y="436" width="1810" height="655" rx="18" fill="#fbfcfe" stroke="#7aa2f7" stroke-width="1.8"/>
+  <rect x="82" y="469" width="252" height="112" rx="14" fill="#f8fafc" stroke="#64748b" stroke-width="1.6" filter="url(#shadow)"/>
+  <text x="208" y="498" text-anchor="middle" class="cardTitle">每轮宿主检查</text><text x="208" y="525" text-anchor="middle" class="body">后台完成通知 · Steering</text><text x="208" y="549" text-anchor="middle" class="body">Interrupt · turn/tool/time 预算</text><text x="208" y="570" text-anchor="middle" class="small">超限 → budget_exhausted</text>
+  <path d="M334 525H378" stroke="#52657a" stroke-width="2.4" fill="none" marker-end="url(#arrow)"/>
+  <rect x="388" y="469" width="280" height="112" rx="14" fill="#fff7ed" stroke="#ea580c" stroke-width="1.6" filter="url(#shadow)"/>
+  <text x="528" y="500" text-anchor="middle" class="cardTitle">BeforeModelCall Hook</text><text x="528" y="529" text-anchor="middle" class="body">prepare context</text><text x="528" y="553" text-anchor="middle" class="body">压缩 · Archive · 证据引用</text>
+  <path d="M668 525H712" stroke="#ea580c" stroke-width="2.4" fill="none" marker-end="url(#arrowOrange)"/>
+  <rect x="722" y="457" width="312" height="136" rx="16" fill="#eef4ff" stroke="#2563eb" stroke-width="2.4" filter="url(#shadow)"/>
+  <text x="878" y="489" text-anchor="middle" class="cardTitle">RecoverySession.complete()</text><text x="878" y="520" text-anchor="middle" class="mono">ChatModel</text><text x="878" y="549" text-anchor="middle" class="body">超时 / 临时错误 → 有界重试</text><text x="878" y="573" text-anchor="middle" class="small">输出 ModelResponse</text>
+  <path d="M1034 525H1081" stroke="#2563eb" stroke-width="2.5" fill="none" marker-end="url(#arrowBlue)"/>
+  <polygon points="1197,457 1313,525 1197,593 1081,525" fill="#fff" stroke="#2563eb" stroke-width="2.2" filter="url(#shadow)"/>
+  <text x="1197" y="519" text-anchor="middle" class="cardTitle">有 tool_calls？</text><text x="1197" y="544" text-anchor="middle" class="small">或 submit_result</text>
+
+  <path d="M1313 525H1360" stroke="#2563eb" stroke-width="2.5" fill="none" marker-end="url(#arrowBlue)"/><text x="1321" y="515" class="tag blue">是</text>
+  <rect x="1370" y="457" width="448" height="136" rx="16" fill="#eef4ff" stroke="#2563eb" stroke-width="2" filter="url(#shadow)"/>
+  <text x="1594" y="487" text-anchor="middle" class="cardTitle">ToolExecutor · 第一段</text>
+  <text x="1594" y="516" text-anchor="middle" class="body">工具存在 → Pydantic 参数校验 → 合同白名单</text>
+  <text x="1594" y="541" text-anchor="middle" class="body">安全 READ 批量并发；WRITE / PROCESS 串行</text>
+  <text x="1594" y="568" text-anchor="middle" class="small">工具预算 / 连续同类失败 circuit</text>
+
+  <path d="M1594 593V635" stroke="#2563eb" stroke-width="2.4" fill="none" marker-end="url(#arrowBlue)"/>
+  <rect x="1295" y="645" width="540" height="146" rx="16" fill="#fff7ed" stroke="#ea580c" stroke-width="2" filter="url(#shadow)"/>
+  <text x="1594" y="675" text-anchor="middle" class="cardTitle">ToolExecutor · 确定性执行链</text>
+  <text x="1594" y="704" text-anchor="middle" class="body">PolicyEngine：ALLOW / DENY / ASK → PermissionAuthorizer（无 broker 则拒绝）</text>
+  <text x="1594" y="730" text-anchor="middle" class="body">PreToolUse Hook → 写锁 / MutationJournal → Tool.run()</text>
+  <text x="1594" y="756" text-anchor="middle" class="body">PostToolUse Hook → ToolResult + Event → 回填 messages</text>
+  <path d="M1295 718H1228" stroke="#0891b2" stroke-width="2" stroke-dasharray="7 6" fill="none" marker-end="url(#arrow)"/>
+
+  <rect x="906" y="645" width="322" height="146" rx="16" fill="#ecfeff" stroke="#0891b2" stroke-width="1.8" filter="url(#shadow)"/>
+  <text x="1067" y="675" text-anchor="middle" class="cardTitle">可选：delegate_readonly</text>
+  <text x="1067" y="704" text-anchor="middle" class="body">独立 messages / model · Semaphore=3</text>
+  <text x="1067" y="730" text-anchor="middle" class="body">read · list · search · submit report</text>
+  <text x="1067" y="756" text-anchor="middle" class="small">无写 / 进程 / 递归委派；失败返回 blocked report</text>
+  <path d="M906 718H780V1072" stroke="#0891b2" stroke-width="1.9" stroke-dasharray="7 6" fill="none" marker-end="url(#arrow)"/>
+
+  <path d="M1835 718V1072H66V525H74" stroke="#2563eb" stroke-width="2" stroke-dasharray="8 6" fill="none" marker-end="url(#arrowBlue)"/>
+  <text x="760" y="1064" class="tag blue">ToolResult → AfterTurn → 回填 messages → 下一轮</text>
+
+  <path d="M1197 593H780V770H212V806" stroke="#52657a" stroke-width="2.4" fill="none" marker-end="url(#arrow)"/><text x="792" y="620" class="tag orange">无调用 / 本批 submit_result 成功</text>
+  <rect x="82" y="816" width="260" height="98" rx="14" fill="#fff7ed" stroke="#ea580c" stroke-width="1.8" filter="url(#shadow)"/>
+  <text x="212" y="847" text-anchor="middle" class="cardTitle">BeforeStop Hook</text><text x="212" y="876" text-anchor="middle" class="body">continue_message → 回循环</text><text x="212" y="899" text-anchor="middle" class="small">否则交给停止门</text>
+  <path d="M342 865H388" stroke="#ea580c" stroke-width="2.4" fill="none" marker-end="url(#arrowOrange)"/>
+  <rect x="398" y="806" width="356" height="118" rx="16" fill="#fff7ed" stroke="#ea580c" stroke-width="2" filter="url(#shadow)"/>
+  <text x="576" y="838" text-anchor="middle" class="cardTitle">CompletionGate（确定性）</text>
+  <text x="576" y="866" text-anchor="middle" class="body">CodingOutcome · Plan / Task DAG 全完成</text>
+  <text x="576" y="891" text-anchor="middle" class="body">最后一次修改后的精确验证必须成功</text>
+  <text x="576" y="914" text-anchor="middle" class="small">block → 注入缺口并继续；unverified → 终态</text>
+  <path d="M754 865H800" stroke="#16a34a" stroke-width="2.4" fill="none" marker-end="url(#arrowGreen)"/>
+  <rect x="810" y="806" width="350" height="118" rx="16" fill="#effcf4" stroke="#16a34a" stroke-width="2" filter="url(#shadow)"/>
+  <text x="985" y="838" text-anchor="middle" class="cardTitle">隔离 GoalEvaluator（可选）</text>
+  <text x="985" y="867" text-anchor="middle" class="body">complete · incomplete · needs_user</text>
+  <text x="985" y="891" text-anchor="middle" class="body">impossible · protocol failure</text>
+  <text x="985" y="914" text-anchor="middle" class="small">新鲜确定性验证对已修改任务具有权威性</text>
+  <path d="M1160 865H1206" stroke="#16a34a" stroke-width="2.4" fill="none" marker-end="url(#arrowGreen)"/>
+  <rect x="1216" y="806" width="602" height="224" rx="16" fill="#fff" stroke="#16a34a" stroke-width="2" filter="url(#shadow)"/>
+  <text x="1517" y="839" text-anchor="middle" class="cardTitle">结构化 AgentResult</text>
+  <rect x="1240" y="862" width="150" height="48" rx="10" fill="#effcf4" stroke="#16a34a"/><text x="1315" y="891" text-anchor="middle" class="mono green">completed</text>
+  <rect x="1410" y="862" width="215" height="48" rx="10" fill="#fff7ed" stroke="#ea580c"/><text x="1517" y="891" text-anchor="middle" class="mono orange">submitted_unverified</text>
+  <rect x="1645" y="862" width="170" height="48" rx="10" fill="#fff7ed" stroke="#ea580c"/><text x="1730" y="891" text-anchor="middle" class="mono orange">waiting_for_user</text>
+  <rect x="1240" y="930" width="150" height="48" rx="10" fill="#fff1f2" stroke="#dc2626"/><text x="1315" y="959" text-anchor="middle" class="mono red">interrupted</text>
+  <rect x="1410" y="930" width="215" height="48" rx="10" fill="#fff1f2" stroke="#dc2626"/><text x="1517" y="959" text-anchor="middle" class="mono red">budget_exhausted</text>
+  <rect x="1645" y="930" width="170" height="48" rx="10" fill="#fff1f2" stroke="#dc2626"/><text x="1730" y="959" text-anchor="middle" class="mono red">failed</text>
+  <text x="1517" y="1008" text-anchor="middle" class="small">outcome · final_text · turns · tool_calls · reason</text>
+
+  <path d="M576 924V1056H208V924" stroke="#dc2626" stroke-width="1.9" stroke-dasharray="7 6" fill="none" marker-end="url(#arrowRed)"/>
+  <text x="324" y="1049" class="tag red">block / incomplete → 注入原因后继续循环</text>
+
+  <text x="55" y="1139" class="section">③ Agent Harness 自身的持久化与证据旁路</text>
+  <rect x="55" y="1158" width="1810" height="144" rx="18" fill="#ecfeff" stroke="#0891b2" stroke-width="1.8"/>
+  <rect x="85" y="1184" width="400" height="92" rx="12" fill="#fff" stroke="#0891b2"/>
+  <text x="285" y="1213" text-anchor="middle" class="cardTitle">JsonlEventSink</text><text x="285" y="1241" text-anchor="middle" class="body">agent / model / tool / context / goal</text><text x="285" y="1263" text-anchor="middle" class="small">以及 subagent.* 有序事件</text>
+  <rect x="520" y="1184" width="400" height="92" rx="12" fill="#fff" stroke="#0891b2"/>
+  <text x="720" y="1213" text-anchor="middle" class="cardTitle">SessionMessageJournal</text><text x="720" y="1241" text-anchor="middle" class="body">模型 / 工具边界消息</text><text x="720" y="1263" text-anchor="middle" class="small">用于对话恢复与可追溯回放</text>
+  <rect x="955" y="1184" width="400" height="92" rx="12" fill="#fff" stroke="#0891b2"/>
+  <text x="1155" y="1213" text-anchor="middle" class="cardTitle">EvidenceArchive / History</text><text x="1155" y="1241" text-anchor="middle" class="body">完整 transcript · 大输出 · SHA-256</text><text x="1155" y="1263" text-anchor="middle" class="small">压缩后仍可按引用检索</text>
+  <rect x="1390" y="1184" width="445" height="92" rx="12" fill="#fff" stroke="#0891b2"/>
+  <text x="1612" y="1213" text-anchor="middle" class="cardTitle">宿主持久状态</text><text x="1612" y="1241" text-anchor="middle" class="body">Plan · TaskGraph · Background · Control</text><text x="1612" y="1263" text-anchor="middle" class="small">Memory · Permission · MutationJournal</text>
+  <path d="M960 1091V1148" stroke="#0891b2" stroke-width="2" stroke-dasharray="6 5" fill="none" marker-end="url(#arrow)"/>
+
+  <rect x="55" y="1334" width="1810" height="55" rx="10" fill="#eef4ff" stroke="#93b4f9"/>
+  <text x="960" y="1358" text-anchor="middle" class="body">返回边界：Agent Harness 到 AgentResult 即结束；外层 Workflow 决定是否继续 change inspection、build、test deploy 与 approval。</text>
+  <text x="960" y="1379" text-anchor="middle" class="small">MultiAgentCoordinator 是宿主显式启动的独立能力，不属于本 AgentLoop，也不在本图中展开。</text>
+</svg>

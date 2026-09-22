@@ -3,7 +3,7 @@ function increment(value) {
 }
 
 function decrement(value) {
-  return value - 1;
+  return Math.max(0, value - 1);
 }
 
 if (typeof document !== "undefined") {

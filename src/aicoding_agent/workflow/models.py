@@ -16,6 +16,7 @@ class DeliveryStage(StrEnum):
     PREPARING_WORKSPACE = "preparing_workspace"
     CODING = "coding"
     INSPECTING_CHANGES = "inspecting_changes"
+    BUILDING = "building"
     TEST_DEPLOYING = "test_deploying"
     TEST_VERIFYING = "test_verifying"
     AWAITING_APPROVAL = "awaiting_approval"
@@ -46,13 +47,17 @@ class WorkflowRun(WorkflowModel):
     contract: dict[str, Any]
     agent_result: dict[str, Any] | None = None
     change_snapshot: dict[str, Any] | None = None
+    build_receipt: dict[str, Any] | None = None
     deployment_receipt: dict[str, Any] | None = None
+    rollback_receipt: dict[str, Any] | None = None
     verification_report: dict[str, Any] | None = None
     approval_package: dict[str, Any] | None = None
     approval_subject_hash: str | None = None
     approval: dict[str, Any] | None = None
     publish_receipt: dict[str, Any] | None = None
     rollback_idempotency_key: str | None = None
+    rollback_status: Literal["not_requested", "succeeded", "failed"] = "not_requested"
+    failure_evidence_refs: list[str] = Field(default_factory=list)
     failure_reason: str | None = None
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
@@ -64,3 +69,5 @@ class WorkflowResult(WorkflowModel):
     failure_reason: str | None = None
     workspace_released: bool = False
     workspace_cleanup_error: str | None = None
+    evidence_refs: list[str] = Field(default_factory=list)
+    rollback_status: Literal["not_requested", "succeeded", "failed"] = "not_requested"

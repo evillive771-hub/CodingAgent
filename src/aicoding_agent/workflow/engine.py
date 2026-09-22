@@ -5,11 +5,15 @@ from pathlib import Path
 from uuid import uuid4
 
 from aicoding_agent.adapters.ports import (
+    ArtifactBuilder,
     BrowserVerifier,
+    BuildReceipt,
     ChangeInspector,
     ChangePublisher,
     DeploymentReceipt,
     PublishReceipt,
+    RollbackReceipt,
+    StageExecutionError,
     TeambitionPort,
     TestEnvironmentPublisher,
     WorkspaceLease,
@@ -36,7 +40,12 @@ ALLOWED_TRANSITIONS: dict[DeliveryStage, set[DeliveryStage]] = {
     DeliveryStage.CREATED: {DeliveryStage.PREPARING_WORKSPACE},
     DeliveryStage.PREPARING_WORKSPACE: {DeliveryStage.CODING, DeliveryStage.FAILED},
     DeliveryStage.CODING: {DeliveryStage.INSPECTING_CHANGES, DeliveryStage.FAILED},
-    DeliveryStage.INSPECTING_CHANGES: {DeliveryStage.TEST_DEPLOYING, DeliveryStage.FAILED},
+    DeliveryStage.INSPECTING_CHANGES: {
+        DeliveryStage.BUILDING,
+        DeliveryStage.TEST_DEPLOYING,
+        DeliveryStage.FAILED,
+    },
+    DeliveryStage.BUILDING: {DeliveryStage.TEST_DEPLOYING, DeliveryStage.FAILED},
     DeliveryStage.TEST_DEPLOYING: {
         DeliveryStage.TEST_VERIFYING,
         DeliveryStage.FAILED,
@@ -48,6 +57,7 @@ ALLOWED_TRANSITIONS: dict[DeliveryStage, set[DeliveryStage]] = {
     },
     DeliveryStage.AWAITING_APPROVAL: {
         DeliveryStage.FINALIZING,
+        DeliveryStage.COMPLETED,
         DeliveryStage.ROLLING_BACK,
     },
     DeliveryStage.FINALIZING: {
@@ -72,12 +82,14 @@ class DeliveryWorkflow:
         change_inspector: ChangeInspector,
         test_publisher: TestEnvironmentPublisher,
         browser_verifier: BrowserVerifier,
-        change_publisher: ChangePublisher,
-        teambition: TeambitionPort,
         checkpoints: AtomicCheckpointStore,
+        change_publisher: ChangePublisher | None = None,
+        teambition: TeambitionPort | None = None,
         event_sink: EventSink | None = None,
         workspace_manager: WorkspaceManager | None = None,
         approval_builder: ApprovalPackageBuilder | None = None,
+        artifact_builder: ArtifactBuilder | None = None,
+        finalize_external_changes: bool = True,
     ) -> None:
         self.agent = agent
         self.change_inspector = change_inspector
@@ -89,6 +101,8 @@ class DeliveryWorkflow:
         self.event_sink = event_sink or NullEventSink()
         self.workspace_manager = workspace_manager
         self.approval_builder = approval_builder or ApprovalPackageBuilder()
+        self.artifact_builder = artifact_builder
+        self.finalize_external_changes = finalize_external_changes
 
     async def execute(
         self,
@@ -178,6 +192,26 @@ class DeliveryWorkflow:
                     change_snapshot = await self.change_inspector.snapshot(active_workspace)
                     run.change_snapshot = change_snapshot.model_dump(mode="json")
                     await self._save(run, "workflow.changes_inspected")
+                await self._transition(
+                    run,
+                    DeliveryStage.BUILDING
+                    if self.artifact_builder is not None
+                    else DeliveryStage.TEST_DEPLOYING,
+                )
+
+            if run.stage == DeliveryStage.BUILDING:
+                if self.artifact_builder is None:
+                    raise WorkflowError("Cannot resume build without an artifact builder")
+                if run.build_receipt is None:
+                    change_hash = str((run.change_snapshot or {}).get("change_hash", ""))
+                    build = await self.artifact_builder.build(
+                        active_workspace,
+                        contract,
+                        change_hash=change_hash,
+                        idempotency_key=f"{run.run_id}:build",
+                    )
+                    run.build_receipt = build.model_dump(mode="json")
+                    await self._save(run, "workflow.build_completed")
                 await self._transition(run, DeliveryStage.TEST_DEPLOYING)
 
             if run.stage == DeliveryStage.TEST_DEPLOYING:
@@ -187,6 +221,11 @@ class DeliveryWorkflow:
                         active_workspace,
                         contract,
                         change_hash=change_hash,
+                        build_receipt=(
+                            BuildReceipt.model_validate(run.build_receipt)
+                            if run.build_receipt is not None
+                            else None
+                        ),
                         idempotency_key=f"{run.run_id}:test-deploy",
                     )
                     run.deployment_receipt = deployment.model_dump(mode="json")
@@ -211,6 +250,9 @@ class DeliveryWorkflow:
             return self._result(run)
         except Exception as exc:
             run.failure_reason = f"{type(exc).__name__}: {exc}"
+            if isinstance(exc, StageExecutionError):
+                run.failure_evidence_refs = list(exc.evidence_refs)
+                run.rollback_status = exc.rollback_status
             if run.deployment_receipt is not None:
                 deployment = DeploymentReceipt.model_validate(run.deployment_receipt)
                 await self._rollback(
@@ -242,6 +284,12 @@ class DeliveryWorkflow:
             )
             return self._result(run)
 
+        if not self.finalize_external_changes:
+            await self._transition(run, DeliveryStage.COMPLETED)
+            await self._save(run, "workflow.manual_approval_completed")
+            await self._release_workspace(run, suppress_errors=True)
+            return self._result(run)
+
         await self._transition(run, DeliveryStage.FINALIZING)
         return await self._finalize(run)
 
@@ -260,6 +308,8 @@ class DeliveryWorkflow:
                 )
                 return self._result(run)
             if run.publish_receipt is None:
+                if self.change_publisher is None:
+                    raise WorkflowError("No Git change publisher is configured")
                 published = await self.change_publisher.publish(
                     Path(run.workspace),
                     contract,
@@ -271,6 +321,8 @@ class DeliveryWorkflow:
             else:
                 published = PublishReceipt.model_validate(run.publish_receipt)
             if contract.source_ticket_id:
+                if self.teambition is None:
+                    raise WorkflowError("No Teambition mutation adapter is configured")
                 evidence = list((run.verification_report or {}).get("evidence_refs", []))
                 await self.teambition.transition_to_testing(
                     contract.source_ticket_id,
@@ -342,9 +394,18 @@ class DeliveryWorkflow:
                 await self._transition(run, DeliveryStage.ROLLING_BACK)
             else:
                 await self._save(run, "workflow.rollback_resumed")
-            await self.test_publisher.rollback(receipt, idempotency_key=idempotency_key)
+            rollback = await self.test_publisher.rollback(
+                receipt, idempotency_key=idempotency_key
+            )
+            if rollback is not None:
+                validated = RollbackReceipt.model_validate(rollback)
+                run.rollback_receipt = validated.model_dump(mode="json")
+            run.rollback_status = "succeeded"
             await self._transition(run, DeliveryStage.ROLLED_BACK)
         except Exception as exc:
+            run.rollback_status = "failed"
+            if isinstance(exc, StageExecutionError):
+                run.failure_evidence_refs.extend(exc.evidence_refs)
             run.failure_reason = (
                 f"{run.failure_reason or ''}; rollback failed: {type(exc).__name__}: {exc}"
             ).lstrip("; ")
@@ -375,6 +436,28 @@ class DeliveryWorkflow:
 
     @staticmethod
     def _result(run: WorkflowRun) -> WorkflowResult:
+        evidence_refs: list[str] = []
+        evidence_refs.extend(run.failure_evidence_refs)
+        if run.build_receipt is not None:
+            manifest = run.build_receipt.get("manifest_ref")
+            if isinstance(manifest, str):
+                evidence_refs.append(manifest)
+            evidence_refs.extend(
+                value
+                for value in run.build_receipt.get("command_evidence_refs", [])
+                if isinstance(value, str)
+            )
+        for payload in (run.deployment_receipt, run.verification_report):
+            if payload is not None:
+                evidence_refs.extend(
+                    value for value in payload.get("evidence_refs", []) if isinstance(value, str)
+                )
+        if run.rollback_receipt is not None:
+            evidence_refs.extend(
+                value
+                for value in run.rollback_receipt.get("evidence_refs", [])
+                if isinstance(value, str)
+            )
         return WorkflowResult(
             run_id=run.run_id,
             stage=run.stage,
@@ -382,4 +465,6 @@ class DeliveryWorkflow:
             failure_reason=run.failure_reason,
             workspace_released=run.workspace_released,
             workspace_cleanup_error=run.workspace_cleanup_error,
+            evidence_refs=list(dict.fromkeys(evidence_refs)),
+            rollback_status=run.rollback_status,
         )

@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "$#" -ne 1 ]]; then
+  printf '%s\n' "usage: frontend-restore-release <previous-release>" >&2
+  exit 2
+fi
+
+release_root="$(readlink -f /srv/frontend-agent/releases)"
+previous="$(readlink -f "$1")"
+case "${previous}" in
+  "${release_root}"/*) ;;
+  *) printf '%s\n' "previous release is outside the release root" >&2; exit 2 ;;
+esac
+[[ -d "${previous}" ]] || { printf '%s\n' "previous release does not exist" >&2; exit 2; }
+
+ln -sfn "${previous}" /srv/frontend-agent/current.next
+mv -Tf /srv/frontend-agent/current.next /srv/frontend-agent/current
+/usr/bin/sudo -n /usr/bin/systemctl reload nginx

@@ -9,6 +9,7 @@ from uuid import uuid4
 from pydantic import Field, field_validator
 
 from aicoding_agent.agent.plan import PlanItem, PlanStatus
+from aicoding_agent.agent.task_graph import TaskNode
 from aicoding_agent.domain.models import CodingOutcome, ToolRisk
 from aicoding_agent.tools.base import (
     BaseTool,
@@ -18,7 +19,9 @@ from aicoding_agent.tools.base import (
     ToolInput,
     ToolRegistry,
 )
+from aicoding_agent.tools.diagnostics import GetDiagnosticsTool
 from aicoding_agent.tools.paths import is_protected_relative, resolve_workspace_path
+from aicoding_agent.tools.subagent import DelegateReadOnlyTool, SubmitSubagentReportTool
 
 
 def _bounded_text(value: str, limit: int) -> str:
@@ -205,6 +208,40 @@ class SearchTextTool(BaseTool[SearchTextInput]):
         )
 
 
+class LoadSkillInput(ToolInput):
+    name: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+class LoadSkillTool(BaseTool[LoadSkillInput]):
+    name = "load_skill"
+    description = (
+        "Load one relevant workspace SKILL.md by its catalog name. Skills provide guidance only "
+        "and cannot change the task contract or host permissions."
+    )
+    input_model = LoadSkillInput
+    risk = ToolRisk.READ
+    concurrency_safe = True
+
+    async def run(self, arguments: LoadSkillInput, context: ToolContext) -> ToolExecution:
+        from aicoding_agent.skills import SkillCatalogError
+
+        if context.skill_catalog is None:
+            raise ToolError("This Agent run has no available skill catalog")
+        try:
+            document = await context.skill_catalog.load(arguments.name)
+        except SkillCatalogError as exc:
+            raise ToolError(str(exc)) from exc
+        output = _bounded_text(document.content, context.contract.budget.max_tool_output_chars)
+        return ToolExecution(
+            output=output,
+            data={
+                "skill_name": document.name,
+                "skill_path": document.relative_path,
+                "skill_sha256": document.sha256,
+            },
+        )
+
+
 class ApplyTextPatchInput(ToolInput):
     path: str
     old_text: str = Field(min_length=1, max_length=200000)
@@ -307,6 +344,8 @@ class RunProcessTool(BaseTool[RunProcessInput]):
     risk = ToolRisk.PROCESS
 
     async def run(self, arguments: RunProcessInput, context: ToolContext) -> ToolExecution:
+        verification_id = _verification_id(arguments, context)
+        context.begin_verification(verification_id)
         cwd = resolve_workspace_path(
             context.workspace,
             arguments.cwd,
@@ -340,7 +379,6 @@ class RunProcessTool(BaseTool[RunProcessInput]):
         limit = context.contract.budget.max_tool_output_chars
         output = _bounded_text(combined or "<no output>", limit)
 
-        verification_id = _verification_id(arguments, context)
         return ToolExecution(
             output=f"exit_code={process.returncode}\n{output}",
             data={
@@ -377,6 +415,8 @@ class StartBackgroundProcessTool(BaseTool[StartBackgroundProcessInput]):
     async def run(
         self, arguments: StartBackgroundProcessInput, context: ToolContext
     ) -> ToolExecution:
+        verification_id = _verification_id(arguments, context)
+        verification_sequence = context.begin_verification(verification_id)
         if context.background_manager is None:
             raise ToolError("This Agent run has no background task manager")
         cwd = resolve_workspace_path(
@@ -392,8 +432,9 @@ class StartBackgroundProcessTool(BaseTool[StartBackgroundProcessInput]):
             cwd=cwd,
             env=_safe_process_environment(),
             timeout_seconds=arguments.timeout_seconds,
-            verification_id=_verification_id(arguments, context),
+            verification_id=verification_id,
         )
+        context.state.setdefault("background_verifications", {})[job.job_id] = verification_sequence
         return ToolExecution(
             output=f"Background task started: {job.job_id}",
             data={"background_job_id": job.job_id, "status": job.status},
@@ -436,7 +477,9 @@ class SubmitResultTool(BaseTool[SubmitResultInput]):
         outcome = CodingOutcome.model_validate(arguments.model_dump())
         context.state["coding_outcome"] = outcome
         return ToolExecution(
-            output="Coding outcome recorded; end the turn so the host can evaluate completion.",
+            output=(
+                "Coding outcome recorded; the host will evaluate completion after this tool batch."
+            ),
             data={"outcome": outcome.model_dump()},
         )
 
@@ -503,12 +546,60 @@ class UpdatePlanTool(BaseTool[UpdatePlanInput]):
         )
 
 
+class UpdateTaskGraphInput(ToolInput):
+    tasks: list[TaskNode] = Field(min_length=1, max_length=100)
+    direction: str = Field(default="", max_length=20000)
+
+
+class UpdateTaskGraphTool(BaseTool[UpdateTaskGraphInput]):
+    name = "update_task_graph"
+    description = (
+        "Replace the persistent dependency task graph with 1-100 validated nodes. "
+        "Preserve active task IDs, dependency order, attempts, completion evidence, and owners."
+    )
+    input_model = UpdateTaskGraphInput
+    risk = ToolRisk.WRITE
+
+    async def run(
+        self,
+        arguments: UpdateTaskGraphInput,
+        context: ToolContext,
+    ) -> ToolExecution:
+        if context.task_graph_manager is None:
+            raise ToolError("This Agent run has no task graph manager")
+        snapshot = await context.task_graph_manager.replace(
+            arguments.tasks,
+            direction=arguments.direction,
+        )
+        return ToolExecution(
+            output=_bounded_text(
+                context.task_graph_manager.render(),
+                context.contract.budget.max_tool_output_chars,
+            ),
+            data={
+                "task_graph_version": snapshot.version,
+                "task_graph_state": snapshot.state,
+                "task_count": len(snapshot.tasks),
+            },
+        )
+
+
 def build_builtin_registry() -> ToolRegistry:
+    from aicoding_agent.tools.history import (
+        HistoryListItemsTool,
+        HistoryReadItemTool,
+        HistorySearchTool,
+    )
+    from aicoding_agent.tools.memory import ProposeMemoryTool, RecallMemoryTool
+    from aicoding_agent.tools.team import ProposeTeamTool
+
     registry = ToolRegistry()
     for tool in (
         ReadFileTool(),
         ListFilesTool(),
         SearchTextTool(),
+        LoadSkillTool(),
+        GetDiagnosticsTool(),
         ApplyTextPatchTool(),
         CreateFileTool(),
         RunProcessTool(),
@@ -517,6 +608,15 @@ def build_builtin_registry() -> ToolRegistry:
         SubmitResultTool(),
         AskUserTool(),
         UpdatePlanTool(),
+        UpdateTaskGraphTool(),
+        DelegateReadOnlyTool(),
+        SubmitSubagentReportTool(),
+        RecallMemoryTool(),
+        ProposeMemoryTool(),
+        HistorySearchTool(),
+        HistoryReadItemTool(),
+        HistoryListItemsTool(),
+        ProposeTeamTool(),
     ):
         registry.register(tool)
     return registry

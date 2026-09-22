@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "$#" -gt 1 ]] || { [[ "$#" -eq 1 ]] && [[ ! "$1" =~ ^[A-Za-z0-9._-]{1,128}$ ]]; }; then
+  printf '%s\n' "usage: frontend-health-check [deployment-id]" >&2
+  exit 2
+fi
+
+curl --fail --silent --show-error --max-time 15 http://127.0.0.1:8080/ >/dev/null
+printf '%s\n' "healthy"

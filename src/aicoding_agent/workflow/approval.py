@@ -47,6 +47,15 @@ class ApprovalPackageBuilder:
         evidence_refs = verification.get("evidence_refs")
         if not isinstance(evidence_refs, list) or not evidence_refs:
             raise ApprovalPackageError("Approval package requires verification evidence")
+        build = self._optional_mapping(run.build_receipt)
+        if build is not None:
+            build_hash = str(build.get("artifact_hash", ""))
+            if not re.fullmatch(r"[a-fA-F0-9]{64}", build_hash):
+                raise ApprovalPackageError("Approval package requires a SHA-256 artifact hash")
+            if build_hash != deployment.get("artifact_hash"):
+                raise ApprovalPackageError("Deployment does not match the frozen build artifact")
+            if not build.get("artifacts") or not build.get("manifest_ref"):
+                raise ApprovalPackageError("Approval package requires a build manifest")
 
         contract_hash = self._hash(canonical_task_contract_payload(contract))
         if run.workspace_lease is not None:
@@ -62,6 +71,7 @@ class ApprovalPackageBuilder:
                 "objective": contract.get("objective"),
                 "acceptance_criteria": contract.get("acceptance_criteria"),
                 "target_environment": contract.get("target_environment"),
+                "repository_url": contract.get("repository_url"),
                 "base_revision": contract.get("base_revision"),
                 "contract_hash": contract_hash,
             },
@@ -72,6 +82,7 @@ class ApprovalPackageBuilder:
                 "tool_calls": agent_result.get("tool_calls"),
             },
             "change_snapshot": change_snapshot,
+            "build_receipt": build,
             "deployment_receipt": deployment,
             "verification_report": verification,
         }
@@ -80,6 +91,14 @@ class ApprovalPackageBuilder:
             subject_hash=self._hash(canonical_subject),
             subject=canonical_subject,
         )
+
+    @staticmethod
+    def _optional_mapping(value: dict[str, Any] | None) -> dict[str, Any] | None:
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise ApprovalPackageError("Approval package has an invalid build_receipt")
+        return value
 
     @staticmethod
     def _required_mapping(name: str, value: dict[str, Any] | None) -> dict[str, Any]:

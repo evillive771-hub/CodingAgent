@@ -1,4 +1,4 @@
-from aicoding_agent.context.builder import compact_messages
+from aicoding_agent.context.builder import compact_messages, micro_compact_messages
 
 
 def test_compaction_keeps_tool_call_and_result_together() -> None:
@@ -75,3 +75,20 @@ def test_compaction_preserves_runtime_control_state_and_latest_verification() ->
     assert "verify" in {
         call["id"] for message in compacted for call in message.get("tool_calls", [])
     }
+
+
+def test_micro_compaction_clears_old_tool_content_but_keeps_recent_results() -> None:
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "task"},
+        {"role": "assistant", "content": None, "tool_calls": [{"id": "old"}]},
+        {"role": "tool", "tool_call_id": "old", "content": "x" * 3_000},
+        {"role": "assistant", "content": None, "tool_calls": [{"id": "new"}]},
+        {"role": "tool", "tool_call_id": "new", "content": "y" * 3_000},
+    ]
+
+    compacted = micro_compact_messages(messages, recent_messages=2)
+
+    assert "Old tool result content cleared" in compacted[3]["content"]
+    assert compacted[5]["content"] == "y" * 3_000
+    assert messages[3]["content"] == "x" * 3_000

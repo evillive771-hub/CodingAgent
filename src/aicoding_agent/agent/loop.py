@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import time
 from pathlib import Path
@@ -9,10 +10,24 @@ from uuid import uuid4
 from aicoding_agent.agent.background import BackgroundStatus, BackgroundTaskManager
 from aicoding_agent.agent.control import ControlIntent, SteeringInbox
 from aicoding_agent.agent.gate import CompletionGate, GateAction
+from aicoding_agent.agent.goal import (
+    GoalEvaluationError,
+    GoalEvaluationInput,
+    GoalEvaluator,
+    GoalStatus,
+)
 from aicoding_agent.agent.hooks import AsyncHookBus, HookContext, HookEvent
+from aicoding_agent.agent.memory import MemoryManager
 from aicoding_agent.agent.plan import PlanManager
+from aicoding_agent.agent.preflight import inspect_runtime, render_runtime
+from aicoding_agent.agent.recovery import RecoveryController
+from aicoding_agent.agent.subagent import ReadOnlySubagentManager
+from aicoding_agent.agent.task_graph import TaskGraphManager
+from aicoding_agent.agent.team import TeamLaunchManager
+from aicoding_agent.chat.journal import SessionMessageJournal
 from aicoding_agent.context.archive import ContextEvidenceArchive
 from aicoding_agent.context.builder import ContextBuilder, compact_messages
+from aicoding_agent.context.compaction import AgentContextCompactor, run_memory_scope
 from aicoding_agent.domain.models import (
     AgentResult,
     AgentStatus,
@@ -22,6 +37,7 @@ from aicoding_agent.domain.models import (
 )
 from aicoding_agent.model.base import ChatModel, ModelError
 from aicoding_agent.persistence.base import EventSink, NullEventSink
+from aicoding_agent.skills import SkillCatalog, SkillCatalogError
 from aicoding_agent.tools.base import ToolContext
 from aicoding_agent.tools.executor import ToolExecutor
 
@@ -39,6 +55,12 @@ class AgentLoop:
         hook_bus: AsyncHookBus | None = None,
         context_archive: ContextEvidenceArchive | None = None,
         background_manager: BackgroundTaskManager | None = None,
+        recovery_controller: RecoveryController | None = None,
+        goal_evaluator: GoalEvaluator | None = None,
+        subagent_manager: ReadOnlySubagentManager | None = None,
+        memory_manager: MemoryManager | None = None,
+        context_compactor: AgentContextCompactor | None = None,
+        team_launch_manager: TeamLaunchManager | None = None,
     ) -> None:
         self.model = model
         self.executor = executor
@@ -49,6 +71,12 @@ class AgentLoop:
         self.hook_bus = hook_bus or AsyncHookBus()
         self.context_archive = context_archive
         self.background_manager = background_manager
+        self.recovery_controller = recovery_controller or RecoveryController()
+        self.goal_evaluator = goal_evaluator
+        self.subagent_manager = subagent_manager
+        self.memory_manager = memory_manager
+        self.context_compactor = context_compactor
+        self.team_launch_manager = team_launch_manager
 
     async def run(
         self,
@@ -58,8 +86,14 @@ class AgentLoop:
         run_id: str | None = None,
         conversation_history: list[dict[str, str]] | None = None,
         plan_manager: PlanManager | None = None,
+        task_graph_manager: TaskGraphManager | None = None,
         control: SteeringInbox | None = None,
         background_manager: BackgroundTaskManager | None = None,
+        conversation_memory: str | None = None,
+        session_id: str | None = None,
+        message_journal: SessionMessageJournal | None = None,
+        resume_messages: list[dict[str, Any]] | None = None,
+        history_scope_id: str | None = None,
     ) -> AgentResult:
         resolved_workspace = workspace.resolve()
         if not resolved_workspace.is_dir():
@@ -67,6 +101,22 @@ class AgentLoop:
         run_id = run_id or uuid4().hex
         background_manager = background_manager or self.background_manager
         started_at = time.monotonic()
+        recovery = self.recovery_controller.new_session()
+        skill_catalog: SkillCatalog | None = None
+        if "load_skill" in contract.allowed_tools:
+            try:
+                skill_catalog = await SkillCatalog.discover(resolved_workspace, contract)
+            except SkillCatalogError as exc:
+                await self.event_sink.emit(
+                    run_id,
+                    "agent.failed",
+                    {"error_type": type(exc).__name__, "message": str(exc)},
+                )
+                return AgentResult(
+                    status=AgentStatus.FAILED,
+                    run_id=run_id,
+                    reason=f"Skill catalog configuration failed: {exc}",
+                )
         tool_context = ToolContext(
             workspace=resolved_workspace,
             contract=contract,
@@ -74,19 +124,83 @@ class AgentLoop:
             plan_manager=plan_manager,
             run_id=run_id,
             background_manager=background_manager,
+            skill_catalog=skill_catalog,
+            task_graph_manager=task_graph_manager,
+            subagent_manager=self.subagent_manager,
+            memory_manager=self.memory_manager,
+            history_store=(
+                self.context_compactor.conversation_compactor.history_store
+                if self.context_compactor is not None
+                else None
+            ),
+            history_scope_id=history_scope_id or run_memory_scope(run_id),
+            team_launch_manager=self.team_launch_manager,
         )
         if plan_manager is not None:
             await plan_manager.initialize()
+        if task_graph_manager is not None:
+            await task_graph_manager.initialize()
         if control is not None:
             await control.initialize()
         if background_manager is not None:
             await background_manager.initialize()
-        messages = self.context_builder.build(
-            contract,
-            resolved_workspace,
-            conversation_history=conversation_history,
-            active_plan=plan_manager.render() if plan_manager is not None else None,
+        if self.memory_manager is not None:
+            await self.memory_manager.initialize()
+        runtime_facts = await inspect_runtime(
+            resolved_workspace, contract, registered_tools=self.executor.registry.names
         )
+        await self.event_sink.emit(run_id, "agent.runtime_preflight", runtime_facts)
+        if resume_messages is None:
+            messages = self.context_builder.build(
+                contract,
+                resolved_workspace,
+                conversation_history=conversation_history,
+                conversation_memory=conversation_memory,
+                active_plan=plan_manager.render() if plan_manager is not None else None,
+                active_task_graph=(
+                    task_graph_manager.render() if task_graph_manager is not None else None
+                ),
+                skill_catalog=(
+                    skill_catalog.render_prompt_catalog() if skill_catalog is not None else None
+                ),
+            )
+            messages[-1]["content"] += "\n" + render_runtime(runtime_facts)
+        else:
+            messages = copy.deepcopy(resume_messages)
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "<resume_checkpoint>Continue from the last safely persisted message. "
+                        "Do not repeat completed tool side effects. Re-check current files before "
+                        "making further changes.</resume_checkpoint>\n"
+                        + render_runtime(runtime_facts)
+                    ),
+                }
+            )
+        journaled_messages = 0
+
+        async def persist_new_messages(api_round_id: str) -> None:
+            nonlocal journaled_messages
+            if message_journal is None or session_id is None:
+                journaled_messages = len(messages)
+                return
+            pending = messages[journaled_messages:]
+            if pending:
+                await message_journal.append_messages(
+                    session_id,
+                    run_id=run_id,
+                    messages=pending,
+                    api_round_id=api_round_id,
+                )
+                journaled_messages = len(messages)
+
+        if resume_messages is None:
+            await persist_new_messages("bootstrap")
+        else:
+            # Recovered messages are already journaled; append only the resume checkpoint.
+            journaled_messages = max(0, len(messages) - 1)
+            await persist_new_messages("resume")
         prompt_hooks = await self.hook_bus.trigger(
             HookEvent.USER_PROMPT_SUBMIT,
             HookContext(
@@ -109,6 +223,7 @@ class AgentLoop:
         turns = 0
         tool_call_count = 0
         stop_blocks = 0
+        budget_warning_emitted = False
 
         await self.event_sink.emit(
             run_id,
@@ -117,6 +232,10 @@ class AgentLoop:
                 "task_id": contract.task_id,
                 "workspace": str(resolved_workspace),
                 "allowed_tools": sorted(contract.allowed_tools),
+                "skills": [
+                    {"name": item.name, "sha256": item.sha256}
+                    for item in (skill_catalog.summaries if skill_catalog is not None else ())
+                ],
             },
         )
 
@@ -134,6 +253,7 @@ class AgentLoop:
                     messages,
                     run_id=run_id,
                     plan_manager=plan_manager,
+                    task_graph_manager=task_graph_manager,
                     turns=turns,
                     tool_calls=tool_call_count,
                     tool_context=tool_context,
@@ -146,6 +266,22 @@ class AgentLoop:
                 )
             turns += 1
             await self.event_sink.emit(run_id, "agent.turn_started", {"turn": turns})
+            remaining_turns = contract.budget.max_turns - turns + 1
+            if remaining_turns <= 3 and not budget_warning_emitted:
+                budget_warning_emitted = True
+                warning = (
+                    f"<budget_warning>{remaining_turns} model rounds remain, including this one. "
+                    "Stop broad exploration. Make only necessary changes, run every configured "
+                    "verification command after the final mutation, then submit a factual result. "
+                    "If runtime verification is unavailable, disclose that limitation instead of "
+                    "claiming verified completion.</budget_warning>"
+                )
+                messages.append({"role": "user", "content": warning})
+                await self.event_sink.emit(
+                    run_id,
+                    "agent.budget_warning",
+                    {"turn": turns, "remaining_turns": remaining_turns},
+                )
             before_model = await self.hook_bus.trigger(
                 HookEvent.BEFORE_MODEL_CALL,
                 HookContext(
@@ -166,17 +302,119 @@ class AgentLoop:
             messages.extend(
                 {"role": "user", "content": message} for message in before_model.inject_messages
             )
+            await persist_new_messages(f"round-{turns}-input")
             try:
-                model_messages = (
-                    await self.context_archive.compact(
-                        messages,
-                        run_id=run_id,
-                        max_chars=self.context_max_chars,
-                    )
-                    if self.context_archive is not None
-                    else compact_messages(messages, max_chars=self.context_max_chars)
+                raw_context_chars = self._messages_size(messages)
+                prepared_context = (
+                    await self.context_compactor.prepare(messages, run_id=run_id)
+                    if self.context_compactor is not None
+                    else None
                 )
-                response = await self.model.complete(model_messages, tool_definitions)
+                model_messages = (
+                    prepared_context.messages
+                    if prepared_context is not None
+                    else (
+                        await self.context_archive.compact(
+                            messages,
+                            run_id=run_id,
+                            max_chars=self.context_max_chars,
+                        )
+                        if self.context_archive is not None
+                        else compact_messages(messages, max_chars=self.context_max_chars)
+                    )
+                )
+                model_context_chars = self._messages_size(model_messages)
+                compaction_record = (
+                    prepared_context.record if prepared_context is not None else None
+                )
+                budget_status = (
+                    self.context_compactor.budget.status(messages)
+                    if self.context_compactor is not None
+                    else None
+                )
+                await self.event_sink.emit(
+                    run_id,
+                    "context.prepared",
+                    {
+                        "turn": turns,
+                        "raw_chars": raw_context_chars,
+                        "model_chars": model_context_chars,
+                        "compacted": (
+                            compaction_record.compacted
+                            if compaction_record is not None
+                            else model_context_chars < raw_context_chars
+                        ),
+                        "archive_compacted": (
+                            compaction_record.archive_compacted
+                            if compaction_record is not None
+                            else False
+                        ),
+                        "semantic_compacted": (
+                            compaction_record.semantic_compacted
+                            if compaction_record is not None
+                            else False
+                        ),
+                        "message_count": len(model_messages),
+                        "raw_tokens": (
+                            compaction_record.raw_tokens if compaction_record is not None else None
+                        ),
+                        "archived_tokens": (
+                            compaction_record.archived_tokens
+                            if compaction_record is not None
+                            else None
+                        ),
+                        "model_tokens": (
+                            compaction_record.model_tokens
+                            if compaction_record is not None
+                            else None
+                        ),
+                        "compaction_strategy": (
+                            compaction_record.strategy if compaction_record is not None else None
+                        ),
+                        "summary_version": (
+                            compaction_record.summary_version
+                            if compaction_record is not None
+                            else None
+                        ),
+                        "notes_version": (
+                            compaction_record.summary_version
+                            if compaction_record is not None
+                            else None
+                        ),
+                        "history_window_id": (
+                            compaction_record.history_window_id
+                            if compaction_record is not None
+                            else None
+                        ),
+                        "compaction_error": (
+                            compaction_record.error if compaction_record is not None else None
+                        ),
+                        "context_warning": (
+                            budget_status.warning if budget_status is not None else False
+                        ),
+                        "warning_threshold_tokens": (
+                            budget_status.warning_threshold_tokens
+                            if budget_status is not None
+                            else None
+                        ),
+                        "compact_threshold_tokens": (
+                            budget_status.compact_threshold_tokens
+                            if budget_status is not None
+                            else None
+                        ),
+                    },
+                )
+                model_started_at = time.monotonic()
+                response = await recovery.complete(
+                    self.model,
+                    model_messages,
+                    tool_definitions,
+                    emit=lambda event_type, data, turn=turns: self.event_sink.emit(
+                        run_id,
+                        event_type,
+                        {"turn": turn, **data},
+                    ),
+                )
             except ModelError as exc:
                 await self.event_sink.emit(
                     run_id,
@@ -197,6 +435,9 @@ class AgentLoop:
                 response.tool_calls,
             )
             messages.append(assistant_message)
+            await persist_new_messages(f"round-{turns}-assistant")
+            if self.context_compactor is not None:
+                self.context_compactor.budget.observe_usage(response.usage)
             await self.event_sink.emit(
                 run_id,
                 "model.response",
@@ -206,6 +447,7 @@ class AgentLoop:
                     "tool_names": [call.name for call in response.tool_calls],
                     "usage": response.usage,
                     "finish_reason": response.finish_reason,
+                    "duration_ms": round((time.monotonic() - model_started_at) * 1000, 3),
                 },
             )
 
@@ -225,11 +467,13 @@ class AgentLoop:
                             ]
                         )
                     )
+                    await persist_new_messages(f"round-{turns}-cancelled-tools")
                 control_result = await self._apply_control(
                     control,
                     messages,
                     run_id=run_id,
                     plan_manager=plan_manager,
+                    task_graph_manager=task_graph_manager,
                     turns=turns,
                     tool_calls=tool_call_count,
                     tool_context=tool_context,
@@ -250,6 +494,7 @@ class AgentLoop:
                     control=control,
                 )
                 messages.extend(self._tool_messages(results))
+                await persist_new_messages(f"round-{turns}-tool-results")
                 await self.hook_bus.trigger(
                     HookEvent.AFTER_TURN,
                     HookContext(
@@ -265,6 +510,7 @@ class AgentLoop:
                         messages,
                         run_id=run_id,
                         plan_manager=plan_manager,
+                        task_graph_manager=task_graph_manager,
                         turns=turns,
                         tool_calls=tool_call_count,
                         tool_context=tool_context,
@@ -272,6 +518,26 @@ class AgentLoop:
                     if control_result is not None:
                         return control_result
                     continue
+                circuit = recovery.observe_tool_results(response.tool_calls, results)
+                if circuit is not None:
+                    await self.event_sink.emit(
+                        run_id,
+                        "tool.circuit_opened",
+                        {"turn": turns, **circuit.model_dump(mode="json")},
+                    )
+                    result = AgentResult(
+                        status=AgentStatus.FAILED,
+                        run_id=run_id,
+                        turns=turns,
+                        tool_calls=tool_call_count,
+                        reason=circuit.reason,
+                    )
+                    await self.event_sink.emit(
+                        run_id,
+                        "agent.failed",
+                        result.model_dump(mode="json"),
+                    )
+                    return result
                 question = tool_context.state.get("user_question")
                 if isinstance(question, str) and question:
                     result = AgentResult(
@@ -288,7 +554,13 @@ class AgentLoop:
                         result.model_dump(mode="json"),
                     )
                     return result
-                continue
+                # A submission requests host validation in this turn, even at the budget
+                # boundary. Evaluate only after the whole batch has settled: later edits
+                # can invalidate the submitted outcome and its verification evidence.
+                if not any(
+                    result.ok and result.tool_name == "submit_result" for result in results
+                ):
+                    continue
 
             stop_hooks = await self.hook_bus.trigger(
                 HookEvent.BEFORE_STOP,
@@ -308,12 +580,157 @@ class AgentLoop:
                 "agent.stop_evaluated",
                 {"turn": turns, "action": decision.action, "reason": decision.reason},
             )
+            if decision.action == GateAction.UNVERIFIED:
+                outcome = tool_context.state.get("coding_outcome")
+                result = AgentResult(
+                    status=AgentStatus.SUBMITTED_UNVERIFIED,
+                    run_id=run_id,
+                    final_text=response.content or outcome.summary,
+                    outcome=outcome,
+                    turns=turns,
+                    tool_calls=tool_call_count,
+                    reason=decision.reason,
+                )
+                await self.event_sink.emit(
+                    run_id,
+                    "agent.submitted_unverified",
+                    result.model_dump(mode="json"),
+                )
+                if not response.tool_calls:
+                    await self.hook_bus.trigger(
+                        HookEvent.AFTER_TURN,
+                        HookContext(
+                            run_id=run_id,
+                            workspace=resolved_workspace,
+                            contract=contract,
+                            turn=turns,
+                        ),
+                    )
+                return result
+
             if decision.action == GateAction.COMPLETE:
                 outcome = tool_context.state.get("coding_outcome")
+                deterministic_authoritative = bool(contract.verification_commands) and (
+                    int(tool_context.state.get("last_mutation_sequence", 0)) > 0
+                    or bool(outcome.changed_files)
+                )
+                if self.goal_evaluator is not None:
+                    goal_started_at = time.monotonic()
+                    try:
+                        goal_result = await self.goal_evaluator.evaluate(
+                            self._goal_input(contract, tool_context)
+                        )
+                    except GoalEvaluationError as exc:
+                        if deterministic_authoritative:
+                            await self.event_sink.emit(
+                                run_id,
+                                "goal.evaluation_failed",
+                                {
+                                    "turn": turns,
+                                    "authoritative": False,
+                                    "overridden_by": "deterministic_verification",
+                                    "error_type": type(exc).__name__,
+                                    "message": str(exc),
+                                },
+                            )
+                        else:
+                            result = AgentResult(
+                                status=AgentStatus.FAILED,
+                                run_id=run_id,
+                                turns=turns,
+                                tool_calls=tool_call_count,
+                                reason=f"Semantic goal evaluation failed: {exc}",
+                            )
+                            await self.event_sink.emit(
+                                run_id,
+                                "agent.failed",
+                                result.model_dump(mode="json"),
+                            )
+                            return result
+                    else:
+                        evaluation = goal_result.evaluation
+                        await self.event_sink.emit(
+                            run_id,
+                            "goal.evaluated",
+                            {
+                                "turn": turns,
+                                "status": evaluation.status,
+                                "reason": evaluation.reason,
+                                "missing": evaluation.missing,
+                                "evidence_refs": evaluation.evidence_refs,
+                                "attempts": goal_result.attempts,
+                                "usage": goal_result.usage,
+                                "authoritative": not deterministic_authoritative,
+                                "overridden_by": (
+                                    "deterministic_verification"
+                                    if deterministic_authoritative
+                                    and evaluation.status != GoalStatus.COMPLETE
+                                    else None
+                                ),
+                                "duration_ms": round(
+                                    (time.monotonic() - goal_started_at) * 1000,
+                                    3,
+                                ),
+                            },
+                        )
+                        if not deterministic_authoritative:
+                            if evaluation.status == GoalStatus.NEEDS_USER:
+                                result = AgentResult(
+                                    status=AgentStatus.WAITING_FOR_USER,
+                                    run_id=run_id,
+                                    final_text=evaluation.reason,
+                                    turns=turns,
+                                    tool_calls=tool_call_count,
+                                    reason="Semantic goal evaluation requires user input",
+                                )
+                                await self.event_sink.emit(
+                                    run_id,
+                                    "agent.waiting_for_user",
+                                    result.model_dump(mode="json"),
+                                )
+                                return result
+                            if evaluation.status == GoalStatus.IMPOSSIBLE:
+                                result = AgentResult(
+                                    status=AgentStatus.FAILED,
+                                    run_id=run_id,
+                                    turns=turns,
+                                    tool_calls=tool_call_count,
+                                    reason=f"Semantic goal is impossible: {evaluation.reason}",
+                                )
+                                await self.event_sink.emit(
+                                    run_id,
+                                    "agent.failed",
+                                    result.model_dump(mode="json"),
+                                )
+                                return result
+                            if evaluation.status == GoalStatus.INCOMPLETE:
+                                stop_blocks += 1
+                                if stop_blocks > contract.budget.max_stop_blocks:
+                                    return await self._budget_result(
+                                        run_id,
+                                        turns,
+                                        tool_call_count,
+                                        "Semantic acceptance remained incomplete after the "
+                                        "retry limit",
+                                    )
+                                messages.append(
+                                    {
+                                        "role": "user",
+                                        "content": (
+                                            "<goal_evaluation_blocked>"
+                                            f"{evaluation.reason} Missing: "
+                                            f"{'; '.join(evaluation.missing)}. "
+                                            "Continue working; deterministic host gates remain "
+                                            "authoritative."
+                                            "</goal_evaluation_blocked>"
+                                        ),
+                                    }
+                                )
+                                continue
                 result = AgentResult(
                     status=AgentStatus.COMPLETED,
                     run_id=run_id,
-                    final_text=response.content,
+                    final_text=response.content or outcome.summary,
                     outcome=outcome,
                     turns=turns,
                     tool_calls=tool_call_count,
@@ -321,15 +738,16 @@ class AgentLoop:
                 await self.event_sink.emit(
                     run_id, "agent.completed", result.model_dump(mode="json")
                 )
-                await self.hook_bus.trigger(
-                    HookEvent.AFTER_TURN,
-                    HookContext(
-                        run_id=run_id,
-                        workspace=resolved_workspace,
-                        contract=contract,
-                        turn=turns,
-                    ),
-                )
+                if not response.tool_calls:
+                    await self.hook_bus.trigger(
+                        HookEvent.AFTER_TURN,
+                        HookContext(
+                            run_id=run_id,
+                            workspace=resolved_workspace,
+                            contract=contract,
+                            turn=turns,
+                        ),
+                    )
                 return result
 
             stop_blocks += 1
@@ -363,6 +781,7 @@ class AgentLoop:
         *,
         run_id: str,
         plan_manager: PlanManager | None,
+        task_graph_manager: TaskGraphManager | None,
         turns: int,
         tool_calls: int,
         tool_context: ToolContext,
@@ -384,6 +803,8 @@ class AgentLoop:
             if item.intent == ControlIntent.STEER:
                 if plan_manager is not None:
                     await plan_manager.supersede(item.content)
+                if task_graph_manager is not None:
+                    await task_graph_manager.supersede(item.content)
                 tool_context.state["coding_outcome"] = None
                 tool_context.state["user_question"] = None
                 messages.append(
@@ -391,8 +812,8 @@ class AgentLoop:
                         "role": "user",
                         "content": (
                             f"<user_steering>{item.content}</user_steering>\n"
-                            "Revise the visible plan before continuing. The frozen task contract "
-                            "and host permissions remain authoritative."
+                            "Revise the visible plan and task graph before continuing. The frozen "
+                            "task contract and host permissions remain authoritative."
                         ),
                     }
                 )
@@ -458,12 +879,18 @@ class AgentLoop:
     ) -> None:
         for job in await manager.collect_completed():
             sequence = await tool_context.next_operation()
+            start_sequence = tool_context.state.get("background_verifications", {}).pop(
+                job.job_id, None
+            )
             if (
                 job.status == BackgroundStatus.COMPLETED
                 and job.exit_code == 0
                 and job.verification_id
+                and start_sequence is not None
+                and tool_context.state.get("verification_attempt", {}).get(job.verification_id)
+                == start_sequence
             ):
-                tool_context.state["verification_success"][job.verification_id] = sequence
+                tool_context.state["verification_success"][job.verification_id] = start_sequence
             messages.append(
                 {
                     "role": "user",
@@ -505,6 +932,65 @@ class AgentLoop:
         )
         await self.event_sink.emit(run_id, "agent.budget_exhausted", result.model_dump(mode="json"))
         return result
+
+    @staticmethod
+    def _goal_input(contract: TaskContract, context: ToolContext) -> GoalEvaluationInput:
+        outcome = context.state.get("coding_outcome")
+        if outcome is None:
+            raise GoalEvaluationError("Deterministic gate did not provide a coding outcome")
+        evidence: dict[str, str] = {
+            "outcome": "Agent self-report; schema validated, not independent correctness evidence"
+        }
+        host_evidence_ids: list[str] = []
+        last_mutation = int(context.state.get("last_mutation_sequence", 0))
+        verification_success = context.state.get("verification_success", {})
+        for command_id, sequence in list(verification_success.items())[:200]:
+            if sequence <= last_mutation:
+                continue
+            evidence[f"verification:{command_id}"] = (
+                f"Verification succeeded at operation sequence {sequence}"
+            )
+            host_evidence_ids.append(f"verification:{command_id}")
+        for evidence_id, excerpt in context.state.get("file_observations", {}).items():
+            evidence[evidence_id] = excerpt
+            host_evidence_ids.append(evidence_id)
+        if context.plan_manager is not None and context.plan_manager.current is not None:
+            plan = context.plan_manager.current
+            for item_index, item in enumerate(plan.items):
+                for evidence_index, value in enumerate(item.evidence):
+                    if len(evidence) >= 500:
+                        break
+                    evidence[f"plan:{plan.version}:{item_index}:{evidence_index}"] = (
+                        "Agent plan self-report: " + value[:1000]
+                    )
+        if (
+            context.task_graph_manager is not None
+            and context.task_graph_manager.current is not None
+        ):
+            graph = context.task_graph_manager.current
+            for task in graph.tasks:
+                for evidence_index, value in enumerate(task.evidence):
+                    if len(evidence) >= 500:
+                        break
+                    evidence[f"task:{task.task_id}:{evidence_index}"] = (
+                        "Agent task self-report: " + value[:1000]
+                    )
+        return GoalEvaluationInput(
+            objective=contract.objective,
+            acceptance_criteria=contract.acceptance_criteria,
+            outcome_summary=outcome.summary,
+            changed_files=outcome.changed_files,
+            risk_notes=outcome.risk_notes,
+            available_evidence=evidence,
+            host_evidence_ids=host_evidence_ids,
+            has_mutations=last_mutation > 0,
+        )
+
+    @staticmethod
+    def _messages_size(messages: list[dict[str, Any]]) -> int:
+        return sum(
+            len(json.dumps(message, ensure_ascii=False, default=str)) for message in messages
+        )
 
     @staticmethod
     def _assistant_message(

@@ -12,12 +12,31 @@ async def test_event_log_redacts_secrets_and_checkpoint_round_trips(tmp_path: Pa
     await sink.emit(
         "run-1",
         "test",
-        {"api_key": "secret-value", "nested": {"authorization": "Bearer secret"}, "ok": 1},
+        {
+            "api_key": "secret-value",
+            "access_token": "credential-token",
+            "nested": {"authorization": "Bearer secret"},
+            "output": "command said API_KEY=another-secret and Bearer third-secret",
+            "prompt_tokens": 123,
+            "raw_tokens": 456,
+            "compact_threshold_tokens": 789,
+            "ok": 1,
+        },
     )
     line = (tmp_path / "events" / "run-1" / "events.jsonl").read_text(encoding="utf-8")
     payload = json.loads(line)
     assert "secret-value" not in line
+    assert "another-secret" not in line
+    assert "third-secret" not in line
+    assert "credential-token" not in line
     assert payload["data"]["api_key"] == "<redacted>"
+    assert payload["data"]["access_token"] == "<redacted>"
+    assert payload["data"]["prompt_tokens"] == 123
+    assert payload["data"]["raw_tokens"] == 456
+    assert payload["data"]["compact_threshold_tokens"] == 789
+    assert payload["data"]["output"] == (
+        "command said API_KEY=<redacted> and Bearer <redacted>"
+    )
 
     restarted_sink = JsonlEventSink(tmp_path / "events")
     await restarted_sink.emit("run-1", "after-restart", {"ok": 2})

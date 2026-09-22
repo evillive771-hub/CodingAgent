@@ -11,7 +11,13 @@ from aicoding_agent.domain.models import TaskContract, ToolRisk
 
 if TYPE_CHECKING:
     from aicoding_agent.agent.background import BackgroundTaskManager
+    from aicoding_agent.agent.memory import MemoryManager
     from aicoding_agent.agent.plan import PlanManager
+    from aicoding_agent.agent.subagent import ReadOnlySubagentManager
+    from aicoding_agent.agent.task_graph import TaskGraphManager
+    from aicoding_agent.agent.team import TeamLaunchManager
+    from aicoding_agent.context.history import HistoryStore
+    from aicoding_agent.skills import SkillCatalog
 
 
 class ToolError(RuntimeError):
@@ -43,6 +49,13 @@ class ToolContext:
         plan_manager: PlanManager | None = None,
         run_id: str = "run",
         background_manager: BackgroundTaskManager | None = None,
+        skill_catalog: SkillCatalog | None = None,
+        task_graph_manager: TaskGraphManager | None = None,
+        subagent_manager: ReadOnlySubagentManager | None = None,
+        memory_manager: MemoryManager | None = None,
+        history_store: HistoryStore | None = None,
+        history_scope_id: str | None = None,
+        team_launch_manager: TeamLaunchManager | None = None,
     ) -> None:
         self.workspace = workspace.resolve()
         self.contract = contract
@@ -50,6 +63,13 @@ class ToolContext:
         self.plan_manager = plan_manager
         self.run_id = run_id
         self.background_manager = background_manager
+        self.skill_catalog = skill_catalog
+        self.task_graph_manager = task_graph_manager
+        self.subagent_manager = subagent_manager
+        self.memory_manager = memory_manager
+        self.history_store = history_store
+        self.history_scope_id = history_scope_id
+        self.team_launch_manager = team_launch_manager
         self.state: dict[str, Any] = {
             "operation_sequence": 0,
             "last_mutation_sequence": 0,
@@ -61,6 +81,13 @@ class ToolContext:
     async def next_operation(self) -> int:
         self.state["operation_sequence"] += 1
         return int(self.state["operation_sequence"])
+
+    def begin_verification(self, command_id: str | None) -> int:
+        sequence = int(self.state["operation_sequence"])
+        if command_id:
+            self.state["verification_success"].pop(command_id, None)
+            self.state.setdefault("verification_attempt", {})[command_id] = sequence
+        return sequence
 
 
 class BaseTool[InputT: ToolInput](ABC):

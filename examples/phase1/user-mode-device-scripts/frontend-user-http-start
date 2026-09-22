@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+runtime_root="${HOME}/frontend-agent"
+run_root="${runtime_root}/run"
+pid_file="${run_root}/http.pid"
+log_file="${run_root}/http.log"
+
+mkdir -p "${run_root}"
+[[ -d "${runtime_root}/current/dist" ]] || {
+  printf '%s\n' "current release does not contain dist" >&2
+  exit 2
+}
+
+if [[ -f "${pid_file}" ]]; then
+  existing_pid="$(cat "${pid_file}")"
+  if [[ "${existing_pid}" =~ ^[0-9]+$ ]] && kill -0 "${existing_pid}" 2>/dev/null; then
+    curl --fail --silent --show-error --max-time 15 http://127.0.0.1:8080/ >/dev/null
+    printf '%s\n' "already-running pid=${existing_pid}"
+    exit 0
+  fi
+fi
+
+nohup python3 -m http.server 8080 \
+  --bind 127.0.0.1 \
+  --directory "${runtime_root}/current/dist" \
+  >>"${log_file}" 2>&1 </dev/null &
+server_pid="$!"
+printf '%s\n' "${server_pid}" >"${pid_file}"
+
+for _ in $(seq 1 20); do
+  if curl --fail --silent --max-time 1 http://127.0.0.1:8080/ >/dev/null 2>&1; then
+    printf '%s\n' "started pid=${server_pid}"
+    exit 0
+  fi
+  sleep 0.25
+done
+
+printf '%s\n' "HTTP server failed to become healthy" >&2
+exit 1

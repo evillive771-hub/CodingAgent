@@ -1,0 +1,52 @@
+{
+  "schema_version": "1",
+  "runtime_root": "D:/aicoding-agent-runtime/frontend-project",
+  "deployment": {
+    "storage": {
+      "host": "nfs-gateway.test.internal",
+      "port": 22,
+      "username": "delivery",
+      "known_hosts": "D:/secure/ssh/known_hosts",
+      "private_key": "D:/secure/ssh/delivery_ed25519"
+    },
+    "device": {
+      "host": "frontend-device.test.internal",
+      "port": 22,
+      "username": "delivery",
+      "known_hosts": "D:/secure/ssh/known_hosts",
+      "private_key": "D:/secure/ssh/delivery_ed25519"
+    },
+    "remote_root": "/srv/frontend-agent",
+    "public_base_url": "https://frontend-device.test.internal/builds",
+    "public_url_template": "https://frontend-device.test.internal/",
+    "commands": {
+      "current_release": {
+        "program": "/usr/local/bin/frontend-current-release"
+      },
+      "activate": {
+        "program": "/usr/local/bin/frontend-activate-release",
+        "args": ["{candidate}", "{deployment_id}"]
+      },
+      "health_check": {
+        "program": "/usr/local/bin/frontend-health-check",
+        "args": ["{deployment_id}"]
+      },
+      "rollback": {
+        "program": "/usr/local/bin/frontend-restore-release",
+        "args": ["{previous}"]
+      }
+    }
+  },
+  "browser": {
+    "browser": "chromium",
+    "headless": true,
+    "path": "",
+    "ready_selector": "body",
+    "expected_text": null,
+    "timeout_seconds": 30,
+    "allowed_hosts": ["frontend-device.test.internal"],
+    "record_video": true,
+    "fail_on_console_error": true,
+    "fail_on_request_failure": true
+  }
+}

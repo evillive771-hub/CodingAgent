@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+runtime_root="${HOME}/frontend-agent"
+release_root="$(readlink -f "${runtime_root}/releases")"
+current_release="$(readlink -f "${runtime_root}/current")"
+
+case "${current_release}" in
+  "${release_root}"/*) printf '%s\n' "${current_release}" ;;
+  *) printf '%s\n' "current release is outside the release root" >&2; exit 2 ;;
+esac

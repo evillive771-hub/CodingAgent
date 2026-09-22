@@ -1,0 +1,37 @@
+{
+  "task_id": "manual:frontend-example",
+  "source": "manual",
+  "repository_url": "https://gitlab.example.internal/frontend/project.git",
+  "base_revision": "main",
+  "objective": "修复前端问题并生成可验证的测试环境交付",
+  "acceptance_criteria": [
+    "lint、类型检查和单元测试通过",
+    "构建产物可重复生成",
+    "测试页面断言通过且没有控制台错误或失败请求"
+  ],
+  "target_environment": "test",
+  "verification_commands": [
+    {
+      "id": "lint",
+      "program": "npm",
+      "args": ["run", "lint"],
+      "cwd": "."
+    },
+    {
+      "id": "unit",
+      "program": "npm",
+      "args": ["test", "--", "--run"],
+      "cwd": "."
+    }
+  ],
+  "build_commands": [
+    {
+      "id": "frontend-build",
+      "program": "npm",
+      "args": ["run", "build"],
+      "cwd": ".",
+      "timeout_seconds": 900
+    }
+  ],
+  "artifact_paths": ["dist"]
+}

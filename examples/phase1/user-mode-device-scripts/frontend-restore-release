@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "$#" -ne 1 ]]; then
+  printf '%s\n' "usage: frontend-restore-release <previous-release>" >&2
+  exit 2
+fi
+
+runtime_root="${HOME}/frontend-agent"
+release_root="$(readlink -f "${runtime_root}/releases")"
+previous="$(readlink -f "$1")"
+case "${previous}" in
+  "${release_root}"/*) ;;
+  *) printf '%s\n' "previous release is outside the release root" >&2; exit 2 ;;
+esac
+[[ -d "${previous}" ]] || { printf '%s\n' "previous release does not exist" >&2; exit 2; }
+
+ln -sfn "${previous}" "${runtime_root}/current.next"
+mv -Tf "${runtime_root}/current.next" "${runtime_root}/current"

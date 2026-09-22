@@ -1,0 +1,1 @@
+delivery ALL=(root) NOPASSWD: /usr/bin/systemctl reload nginx

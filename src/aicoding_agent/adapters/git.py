@@ -25,6 +25,10 @@ class GitPublishError(RuntimeError):
     pass
 
 
+class GitIntegrationError(RuntimeError):
+    pass
+
+
 class GitChangeInspector:
     """Read-only generic Git inspector for GitLab and GitHub workspaces."""
 
@@ -140,6 +144,8 @@ class LocalGitWorktreeManager:
             .strip()
         ).resolve()
         self._validate_root_separation(repository_root)
+        if contract.repository_url is not None:
+            await self._validate_repository_origin(repository_root, contract.repository_url)
         contract_hash = self._contract_hash(contract)
 
         lease_id = hashlib.sha256(f"{contract.task_id}\0{run_id}".encode()).hexdigest()[:24]
@@ -239,6 +245,37 @@ class LocalGitWorktreeManager:
                 except GitWorkspaceError:
                     pass
             raise
+
+    async def _validate_repository_origin(self, repository: Path, expected: str) -> None:
+        try:
+            raw_urls = await _run_git(
+                repository,
+                "remote",
+                "get-url",
+                "--all",
+                "origin",
+                error_type=GitWorkspaceError,
+                timeout_seconds=self.command_timeout_seconds,
+            )
+        except GitWorkspaceError as exc:
+            raise GitWorkspaceError(
+                "Task contract specifies repository_url but the checkout has no readable origin"
+            ) from exc
+        configured = self._normalized_git_url(expected)
+        actual = {
+            self._normalized_git_url(value)
+            for value in raw_urls.decode(errors="replace").splitlines()
+            if value.strip()
+        }
+        if configured not in actual:
+            raise GitWorkspaceError(
+                "Local checkout origin does not match the task contract repository_url"
+            )
+
+    @staticmethod
+    def _normalized_git_url(value: str) -> str:
+        normalized = value.strip().replace("\\", "/").rstrip("/")
+        return normalized[:-4] if normalized.lower().endswith(".git") else normalized
 
     async def release(self, lease: WorkspaceLease) -> None:
         lock = self._locks.setdefault(lease.run_id, asyncio.Lock())
@@ -364,6 +401,160 @@ class LocalGitWorktreeManager:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
+
+
+class GitCandidateIntegrator:
+    """Compose validated candidates into a managed local worktree without push or source merge."""
+
+    def __init__(
+        self,
+        *,
+        safe_hooks_dir: Path,
+        command_timeout_seconds: float = 120.0,
+    ) -> None:
+        self.safe_hooks_dir = safe_hooks_dir.resolve()
+        self.command_timeout_seconds = command_timeout_seconds
+        self._lock = asyncio.Lock()
+
+    async def integrate(
+        self,
+        candidate_workspace: Path,
+        integration_workspace: Path,
+        *,
+        task_id: str,
+        expected_candidate_base: str,
+    ) -> str:
+        candidate = candidate_workspace.resolve()
+        integration = integration_workspace.resolve()
+        if not candidate.is_dir() or not integration.is_dir():
+            raise GitIntegrationError("Candidate and integration worktrees must exist")
+        if self.safe_hooks_dir in {candidate, integration} or any(
+            self.safe_hooks_dir.is_relative_to(path) for path in (candidate, integration)
+        ):
+            raise GitIntegrationError("Safe Git hooks directory must be outside worktrees")
+        async with self._lock:
+            candidate_head = (await self._git(candidate, "rev-parse", "HEAD")).decode().strip()
+            if candidate_head != expected_candidate_base:
+                raise GitIntegrationError("Candidate HEAD no longer matches its frozen base")
+            if (await self._git(integration, "status", "--porcelain")).strip():
+                raise GitIntegrationError("Integration worktree is not clean")
+            await asyncio.to_thread(self.safe_hooks_dir.mkdir, parents=True, exist_ok=True)
+            await self._git(
+                candidate,
+                "add",
+                "--all",
+                "--",
+                ".",
+                ":(exclude).aicoding-agent/**",
+            )
+            patch = await self._git(
+                candidate,
+                "diff",
+                "--cached",
+                "--binary",
+                "--full-index",
+                "HEAD",
+                "--",
+                ".",
+            )
+            if not patch:
+                raise GitIntegrationError("Validated candidate contains no staged changes")
+            await self._git_input(
+                integration,
+                patch,
+                "apply",
+                "--check",
+                "--index",
+                "--binary",
+                "-",
+            )
+            try:
+                await self._git_input(integration, patch, "apply", "--index", "--binary", "-")
+                message = f"coordinator candidate: {task_id}"[:240]
+                await self._git(
+                    integration,
+                    "-c",
+                    "user.name=AI Coding Coordinator",
+                    "-c",
+                    "user.email=coordinator@example.invalid",
+                    "-c",
+                    f"core.hooksPath={self.safe_hooks_dir}",
+                    "commit",
+                    "--no-gpg-sign",
+                    "-m",
+                    message,
+                )
+            except Exception:
+                await self._git(integration, "reset", "--hard", "HEAD")
+                raise
+            if (await self._git(integration, "status", "--porcelain")).strip():
+                raise GitIntegrationError("Integration commit left an unclean worktree")
+            return (await self._git(integration, "rev-parse", "HEAD")).decode().strip()
+
+    async def is_ancestor(
+        self,
+        repository: Path,
+        ancestor: str,
+        descendant: str,
+    ) -> bool:
+        process = await asyncio.create_subprocess_exec(
+            "git",
+            "merge-base",
+            "--is-ancestor",
+            ancestor,
+            descendant,
+            cwd=str(repository.resolve()),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _, stderr = await asyncio.wait_for(
+                process.communicate(),
+                self.command_timeout_seconds,
+            )
+        except TimeoutError as exc:
+            process.kill()
+            await process.communicate()
+            raise GitIntegrationError("Git ancestry check timed out") from exc
+        if process.returncode == 0:
+            return True
+        if process.returncode == 1:
+            return False
+        raise GitIntegrationError(
+            "Git ancestry check failed: " + stderr.decode(errors="replace")[:1000]
+        )
+
+    async def _git(self, workspace: Path, *args: str) -> bytes:
+        return await _run_git(
+            workspace,
+            *args,
+            error_type=GitIntegrationError,
+            timeout_seconds=self.command_timeout_seconds,
+        )
+
+    async def _git_input(self, workspace: Path, payload: bytes, *args: str) -> bytes:
+        process = await asyncio.create_subprocess_exec(
+            "git",
+            *args,
+            cwd=str(workspace),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(payload),
+                self.command_timeout_seconds,
+            )
+        except TimeoutError as exc:
+            process.kill()
+            await process.communicate()
+            raise GitIntegrationError("Git patch operation timed out") from exc
+        if process.returncode != 0:
+            raise GitIntegrationError(
+                "Git patch operation failed: " + stderr.decode(errors="replace")[:1000]
+            )
+        return stdout
 
 
 class GitBranchPublisher:

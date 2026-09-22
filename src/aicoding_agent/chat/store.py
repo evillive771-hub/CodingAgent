@@ -4,6 +4,9 @@ import asyncio
 import json
 import os
 import re
+from collections.abc import Awaitable, Callable
+from contextlib import AsyncExitStack
+from datetime import UTC, datetime
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -47,6 +50,54 @@ class ChatTranscriptStore:
             await asyncio.to_thread(self._append, path, turn.model_dump(mode="json"))
             return path
 
+    async def fork(
+        self,
+        source_session_id: str,
+        target_session_id: str,
+        *,
+        through_turn: int | None = None,
+        before_write: Callable[[], Awaitable[None]] | None = None,
+    ) -> list[ChatTurn]:
+        source_session_id = validate_session_id(source_session_id)
+        target_session_id = validate_session_id(target_session_id)
+        if source_session_id == target_session_id:
+            raise ChatStoreError("Fork target must differ from the source session")
+        source_path = self._path(source_session_id)
+        target_path = self._path(target_session_id)
+        lock_ids = sorted({source_session_id, target_session_id})
+        async with AsyncExitStack() as stack:
+            for lock_id in lock_ids:
+                lock = self._locks.setdefault(lock_id, asyncio.Lock())
+                await stack.enter_async_context(lock)
+            source = await asyncio.to_thread(self._load, source_path)
+            if not source:
+                raise ChatStoreError("Cannot fork an empty or missing source session")
+            selected_turn = len(source) if through_turn is None else through_turn
+            if not 1 <= selected_turn <= len(source):
+                raise ChatStoreError(
+                    f"Fork turn must be between 1 and {len(source)}, received {selected_turn}"
+                )
+            if target_path.exists():
+                raise ChatStoreError(f"Fork target session already exists: {target_session_id}")
+            cloned = [
+                turn.model_copy(
+                    update={
+                        "run_id": f"fork-{target_session_id}-{turn.turn_number:04d}",
+                        "origin_run_id": turn.origin_run_id or turn.run_id,
+                        "created_at": datetime.now(UTC),
+                    }
+                )
+                for turn in source[:selected_turn]
+            ]
+            if before_write is not None:
+                await before_write()
+            await asyncio.to_thread(
+                self._write_all,
+                target_path,
+                [turn.model_dump(mode="json") for turn in cloned],
+            )
+            return cloned
+
     def _path(self, session_id: str) -> Path:
         validated = validate_session_id(session_id)
         return self.root / validated / "turns.jsonl"
@@ -82,3 +133,18 @@ class ChatTranscriptStore:
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
+
+    @staticmethod
+    def _write_all(path: Path, payloads: list[dict[str, object]]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.fork.tmp")
+        try:
+            with temporary.open("x", encoding="utf-8", newline="\n") as handle:
+                for payload in payloads:
+                    handle.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+                    handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)

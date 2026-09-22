@@ -98,6 +98,37 @@ class PolicyEngine:
                     ),
                 )
 
+        if tool.name == "get_diagnostics":
+            diagnostic_id = str(argument_data.get("diagnostic_id", ""))
+            command = next(
+                (item for item in contract.diagnostic_commands if item.id == diagnostic_id),
+                None,
+            )
+            if command is None:
+                return PolicyDecision(
+                    behavior=PolicyBehavior.DENY,
+                    reason=f"Unknown task-contract diagnostic ID: {diagnostic_id}",
+                )
+            program_name = Path(command.program.lower()).stem
+            if program_name not in {item.lower() for item in contract.allowed_commands}:
+                return PolicyDecision(
+                    behavior=PolicyBehavior.DENY,
+                    reason=f"Diagnostic executable {program_name!r} is not allowed by the contract",
+                )
+            try:
+                resolve_workspace_path(
+                    workspace,
+                    command.cwd,
+                    allowed_prefixes=contract.allowed_path_prefixes,
+                )
+            except ToolError as exc:
+                return PolicyDecision(behavior=PolicyBehavior.DENY, reason=str(exc))
+
+        if tool.name == "propose_team":
+            # The tool may only create a local proposal. Team startup remains a separate,
+            # host-owned approval transition enforced by TeamLaunchManager and Coordinator.
+            return PolicyDecision(behavior=PolicyBehavior.ALLOW)
+
         if tool.risk == ToolRisk.EXTERNAL:
             return PolicyDecision(
                 behavior=PolicyBehavior.ASK,

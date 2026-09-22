@@ -31,6 +31,20 @@ class ContextEvidenceArchive:
         recent_messages: int = 24,
     ) -> list[dict[str, Any]]:
         validate_run_id(run_id)
+        copied = await self.archive_messages(messages, run_id=run_id)
+        return compact_messages(
+            copied,
+            max_chars=max_chars,
+            recent_messages=recent_messages,
+        )
+
+    async def archive_messages(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        run_id: str,
+    ) -> list[dict[str, Any]]:
+        """Persist raw context and replace only oversized tool results with references."""
         await self.persist_transcript(run_id, messages)
         copied = copy.deepcopy(messages)
         for message in copied:
@@ -49,11 +63,7 @@ class ContextEvidenceArchive:
                 f"{content[-preview_size:]}\n"
                 f'<evidence path="{path}" sha256="{digest}" />'
             )
-        return compact_messages(
-            copied,
-            max_chars=max_chars,
-            recent_messages=recent_messages,
-        )
+        return copied
 
     async def persist_transcript(self, run_id: str, messages: list[dict[str, Any]]) -> Path:
         validate_run_id(run_id)

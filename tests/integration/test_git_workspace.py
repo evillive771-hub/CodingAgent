@@ -96,6 +96,26 @@ async def test_worktree_prepare_rejects_unknown_base_revision(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_worktree_prepare_binds_configured_repository_url_to_origin(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    await create_repository(repository)
+    await git(repository, "remote", "add", "origin", "https://git.example/team/project.git")
+    manager = LocalGitWorktreeManager(tmp_path / "worktrees")
+
+    matching = contract().model_copy(
+        update={"repository_url": "https://git.example/team/project"}
+    )
+    lease = await manager.prepare(repository, matching, run_id="matching-origin")
+    await manager.release(lease)
+
+    mismatched = contract().model_copy(
+        update={"repository_url": "https://git.example/team/another.git"}
+    )
+    with pytest.raises(GitWorkspaceError, match="does not match"):
+        await manager.prepare(repository, mismatched, run_id="wrong-origin")
+
+
+@pytest.mark.asyncio
 async def test_worktree_release_refuses_tampered_target(tmp_path: Path) -> None:
     repository = tmp_path / "repository"
     await create_repository(repository)

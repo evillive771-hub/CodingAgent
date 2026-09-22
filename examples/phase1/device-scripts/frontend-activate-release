@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "$#" -ne 2 ]] || [[ ! "$2" =~ ^[A-Za-z0-9._-]{1,128}$ ]]; then
+  printf '%s\n' "usage: frontend-activate-release <candidate> <deployment-id>" >&2
+  exit 2
+fi
+
+release_root="$(readlink -f /srv/frontend-agent/releases)"
+candidate="$(readlink -f "$1")"
+case "${candidate}" in
+  "${release_root}"/*) ;;
+  *) printf '%s\n' "candidate is outside the release root" >&2; exit 2 ;;
+esac
+[[ -d "${candidate}" ]] || { printf '%s\n' "candidate does not exist" >&2; exit 2; }
+
+ln -sfn "${candidate}" /srv/frontend-agent/current.next
+mv -Tf /srv/frontend-agent/current.next /srv/frontend-agent/current
+/usr/bin/sudo -n /usr/bin/systemctl reload nginx

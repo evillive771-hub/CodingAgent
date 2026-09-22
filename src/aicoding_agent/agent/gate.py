@@ -5,12 +5,14 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict
 
 from aicoding_agent.agent.plan import PlanState, PlanStatus
+from aicoding_agent.agent.task_graph import TaskGraphState, TaskNodeStatus
 from aicoding_agent.domain.models import CodingOutcome, TaskContract
 from aicoding_agent.tools.base import ToolContext
 
 
 class GateAction(StrEnum):
     COMPLETE = "complete"
+    UNVERIFIED = "unverified"
     BLOCK = "block"
 
 
@@ -38,6 +40,26 @@ class CompletionGate:
                         "update it before stopping."
                     ),
                 )
+        if context.task_graph_manager is not None:
+            graph = context.task_graph_manager.current
+            if graph is not None and graph.state == TaskGraphState.SUPERSEDED:
+                return GateDecision(
+                    action=GateAction.BLOCK,
+                    reason=(
+                        "The previous task graph was superseded by user steering; "
+                        "create a new task graph."
+                    ),
+                )
+            if graph is not None and any(
+                task.status != TaskNodeStatus.COMPLETED for task in graph.tasks
+            ):
+                return GateDecision(
+                    action=GateAction.BLOCK,
+                    reason=(
+                        "The active task graph still contains unfinished tasks; "
+                        "update it before stopping."
+                    ),
+                )
         outcome = context.state.get("coding_outcome")
         if not isinstance(outcome, CodingOutcome):
             return GateDecision(
@@ -53,6 +75,14 @@ class CompletionGate:
             return GateDecision(
                 action=GateAction.COMPLETE,
                 reason="A structured read-only outcome is present; no verification is required.",
+            )
+        if not contract.verification_commands:
+            return GateDecision(
+                action=GateAction.UNVERIFIED,
+                reason=(
+                    "Structured outcome submitted, but code changes cannot be marked complete "
+                    "because no verification commands were configured."
+                ),
             )
         successes: dict[str, int] = context.state.get("verification_success", {})
         missing: list[str] = []

@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from aicoding_agent.adapters.fakes import (
+    FakeArtifactBuilder,
     FakeBrowserVerifier,
     FakeChangeInspector,
     FakeChangePublisher,
@@ -10,7 +11,7 @@ from aicoding_agent.adapters.fakes import (
     FakeTestEnvironmentPublisher,
     FakeWorkspaceManager,
 )
-from aicoding_agent.adapters.ports import VerificationReport
+from aicoding_agent.adapters.ports import StageExecutionError, VerificationReport
 from aicoding_agent.domain.models import AgentResult, AgentStatus, CodingOutcome, TaskContract
 from aicoding_agent.persistence.jsonl import AtomicCheckpointStore
 from aicoding_agent.workflow.engine import DeliveryWorkflow, WorkflowError
@@ -52,6 +53,16 @@ class CrashOnceVerifier:
 class CrashOnceTeambition(FakeTeambitionAdapter):
     async def transition_to_testing(self, *args, **kwargs):
         raise PlannedCrash("simulated host crash after Git publication")
+
+
+class InternallyRolledBackPublisher(FakeTestEnvironmentPublisher):
+    async def publish(self, *args, **kwargs):
+        del args, kwargs
+        raise StageExecutionError(
+            "activation health check failed",
+            evidence_refs=["fake://deployment/failure", "fake://rollback/automatic"],
+            rollback_status="succeeded",
+        )
 
 
 def build_workflow(
@@ -130,6 +141,67 @@ async def test_failed_test_verification_rolls_back(tmp_path: Path) -> None:
     assert result.stage == "rolled_back"
     assert publisher.rolled_back == [publisher.published[0].deployment_id]
     assert "verification failed" in (result.failure_reason or "").lower()
+    assert result.rollback_status == "succeeded"
+    assert f"fake://rollback/{publisher.published[0].deployment_id}" in result.evidence_refs
+
+
+@pytest.mark.asyncio
+async def test_deployment_failure_preserves_internal_rollback_evidence(tmp_path: Path) -> None:
+    contract = TaskContract(
+        task_id="internal-rollback",
+        objective="Preserve deployment failure evidence",
+        acceptance_criteria=["The workflow reports the automatic rollback"],
+        target_environment="test",
+    )
+    workflow, _, _, _ = build_workflow(tmp_path)
+    workflow.test_publisher = InternallyRolledBackPublisher()
+
+    result = await workflow.execute(contract, tmp_path, run_id="internal-rollback-run")
+
+    assert result.stage == "failed"
+    assert result.rollback_status == "succeeded"
+    assert result.evidence_refs == [
+        "fake://deployment/failure",
+        "fake://rollback/automatic",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_phase_one_builds_before_deploy_and_approval_does_not_publish(
+    tmp_path: Path,
+) -> None:
+    contract = TaskContract(
+        task_id="phase-one",
+        objective="Complete the test-only delivery flow",
+        acceptance_criteria=["Approval is bound to the artifact manifest"],
+        target_environment="test",
+    )
+    builder = FakeArtifactBuilder()
+    workflow, publisher, teambition, change_publisher = build_workflow(tmp_path)
+    workflow.artifact_builder = builder
+    workflow.finalize_external_changes = False
+
+    waiting = await workflow.execute(contract, tmp_path, run_id="phase-one-run")
+
+    assert waiting.stage == "awaiting_approval"
+    checkpoint = await workflow.checkpoints.load("phase-one-run")
+    assert checkpoint is not None
+    assert checkpoint["build_receipt"]["artifact_hash"]
+    assert checkpoint["approval_package"]["subject"]["build_receipt"]["manifest_ref"]
+    assert publisher.published[0].artifact_hash == builder.receipts[0].artifact_hash
+
+    completed = await workflow.decide(
+        "phase-one-run",
+        ApprovalRecord(
+            decision="approved",
+            subject_hash=waiting.approval_subject_hash or "",
+            approver="frontend-owner",
+        ),
+    )
+
+    assert completed.stage == "completed"
+    assert change_publisher.published == []
+    assert teambition.transitions == []
 
 
 @pytest.mark.asyncio
