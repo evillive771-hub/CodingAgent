@@ -23,6 +23,7 @@ _ADAPTER_PATH = _PROJECT_ROOT.parent / "benchmark-runs" / "harbor_coding_agent.p
 def adapter(monkeypatch: pytest.MonkeyPatch):
     if not _ADAPTER_PATH.is_file():
         pytest.skip("The optional maintained Harbor adapter is not installed")
+    monkeypatch.setenv("CODING_AGENT_BACKEND", "python")
     # Harbor itself runs in a separate environment; exercise the adapter without installing it.
     for name, symbol in (
         ("harbor.agents.base", "BaseAgent"),
@@ -77,6 +78,27 @@ def test_guidance_install_rejects_existing_task_content(adapter, tmp_path: Path)
     with pytest.raises(FileExistsError):
         adapter._install_review_guidance(_PROJECT_ROOT, tmp_path)
     assert content.read_text(encoding="utf-8") == "existing task content"
+
+
+def test_runtime_summary_preserves_per_task_latency_percentiles(adapter, tmp_path: Path) -> None:
+    events = tmp_path / "runtime" / "runs" / "run-1" / "events.jsonl"
+    events.parent.mkdir(parents=True)
+    records = [
+        {"event_type": "model.response", "data": {"duration_ms": 100}},
+        {"event_type": "model.response", "data": {"duration_ms": 300}},
+        {"event_type": "tool.finished", "data": {"duration_ms": 20}},
+        {
+            "run_id": "run-1",
+            "event_type": "agent.completed",
+            "data": {"status": "completed", "turns": 2, "tool_calls": 1},
+        },
+    ]
+    events.write_text("\n".join(json.dumps(record) for record in records), encoding="utf-8")
+    summary = adapter._runtime_summary(tmp_path / "runtime", tmp_path / "archive.zip")
+    latency = summary["runtime"]["latency_ms"]
+    assert latency["model"] == {"n": 2, "p50": 200.0, "p90": 280.0, "p95": 290.0}
+    assert latency["tool"] == {"n": 1, "p50": 20.0, "p90": 20.0, "p95": 20.0}
+    assert latency["goal"] == {"n": 0, "p50": None, "p90": None, "p95": None}
 
 
 @pytest.mark.asyncio

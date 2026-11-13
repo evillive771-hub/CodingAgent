@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from aicoding_agent.adapters.ports import (
@@ -23,13 +24,16 @@ from aicoding_agent.agent.loop import AgentLoop
 from aicoding_agent.domain.models import AgentResult, AgentStatus, TargetEnvironment, TaskContract
 from aicoding_agent.persistence.base import EventSink, NullEventSink
 from aicoding_agent.persistence.jsonl import AtomicCheckpointStore
-from aicoding_agent.workflow.approval import ApprovalPackageBuilder
+from aicoding_agent.workflow.approval import ApprovalPackageBuilder, ApprovalPackageError
 from aicoding_agent.workflow.models import (
     ApprovalRecord,
     DeliveryStage,
     WorkflowResult,
     WorkflowRun,
 )
+
+if TYPE_CHECKING:
+    from aicoding_agent.regression.controller import RegressionController
 
 
 class WorkflowError(RuntimeError):
@@ -39,14 +43,27 @@ class WorkflowError(RuntimeError):
 ALLOWED_TRANSITIONS: dict[DeliveryStage, set[DeliveryStage]] = {
     DeliveryStage.CREATED: {DeliveryStage.PREPARING_WORKSPACE},
     DeliveryStage.PREPARING_WORKSPACE: {DeliveryStage.CODING, DeliveryStage.FAILED},
-    DeliveryStage.CODING: {DeliveryStage.INSPECTING_CHANGES, DeliveryStage.FAILED},
+    DeliveryStage.CODING: {
+        DeliveryStage.REGRESSION_VERIFYING,
+        DeliveryStage.INSPECTING_CHANGES,
+        DeliveryStage.FAILED,
+    },
+    DeliveryStage.REGRESSION_VERIFYING: {
+        DeliveryStage.INSPECTING_CHANGES,
+        DeliveryStage.BLOCKED,
+        DeliveryStage.FAILED,
+    },
     DeliveryStage.INSPECTING_CHANGES: {
+        DeliveryStage.BLOCKED,
         DeliveryStage.BUILDING,
         DeliveryStage.TEST_DEPLOYING,
         DeliveryStage.FAILED,
     },
-    DeliveryStage.BUILDING: {DeliveryStage.TEST_DEPLOYING, DeliveryStage.FAILED},
+    DeliveryStage.BUILDING: {
+        DeliveryStage.TEST_DEPLOYING, DeliveryStage.BLOCKED, DeliveryStage.FAILED,
+    },
     DeliveryStage.TEST_DEPLOYING: {
+        DeliveryStage.BLOCKED,
         DeliveryStage.TEST_VERIFYING,
         DeliveryStage.FAILED,
         DeliveryStage.ROLLING_BACK,
@@ -68,6 +85,7 @@ ALLOWED_TRANSITIONS: dict[DeliveryStage, set[DeliveryStage]] = {
     DeliveryStage.ROLLING_BACK: {DeliveryStage.ROLLED_BACK, DeliveryStage.FAILED},
     DeliveryStage.COMPLETED: set(),
     DeliveryStage.FAILED: set(),
+    DeliveryStage.BLOCKED: set(),
     DeliveryStage.ROLLED_BACK: set(),
 }
 
@@ -90,6 +108,7 @@ class DeliveryWorkflow:
         approval_builder: ApprovalPackageBuilder | None = None,
         artifact_builder: ArtifactBuilder | None = None,
         finalize_external_changes: bool = True,
+        regression_controller: RegressionController | None = None,
     ) -> None:
         self.agent = agent
         self.change_inspector = change_inspector
@@ -103,6 +122,7 @@ class DeliveryWorkflow:
         self.approval_builder = approval_builder or ApprovalPackageBuilder()
         self.artifact_builder = artifact_builder
         self.finalize_external_changes = finalize_external_changes
+        self.regression_controller = regression_controller
 
     async def execute(
         self,
@@ -139,6 +159,7 @@ class DeliveryWorkflow:
             DeliveryStage.AWAITING_APPROVAL,
             DeliveryStage.COMPLETED,
             DeliveryStage.FAILED,
+            DeliveryStage.BLOCKED,
             DeliveryStage.ROLLED_BACK,
         }:
             return self._result(run)
@@ -175,17 +196,50 @@ class DeliveryWorkflow:
             active_workspace = Path(run.workspace)
 
             if run.stage == DeliveryStage.CODING:
-                if run.agent_result is None:
-                    agent_result = await self.agent.run(
-                        contract, active_workspace, run_id=run.run_id
-                    )
-                    run.agent_result = agent_result.model_dump(mode="json")
-                    await self._save(run, "workflow.coding_completed")
+                if self.regression_controller is not None:
+                    await self._transition(run, DeliveryStage.REGRESSION_VERIFYING)
                 else:
-                    agent_result = AgentResult.model_validate(run.agent_result)
-                if agent_result.status != AgentStatus.COMPLETED:
-                    raise WorkflowError(agent_result.reason or "Coding Agent did not complete")
+                    await self._complete_legacy_coding(run, contract, active_workspace)
+
+            if run.stage == DeliveryStage.REGRESSION_VERIFYING:
+                if self.regression_controller is None:
+                    raise WorkflowError("Cannot resume regression without a regression controller")
+                # The controller snapshots the actual source files and owns its candidates.
+                # A workspace manager's lease continues to refer to its original worktree.
+                outcome = await self.regression_controller.run(
+                    contract,
+                    source_workspace,
+                    run_id=run.run_id,
+                    agent=self.agent,
+                )
+                run.regression_outcome = outcome.model_dump(mode="json")
+                run.regression_report = (
+                    outcome.report.model_dump(mode="json") if outcome.report is not None else None
+                )
+                run.agent_result = outcome.agent_result.model_dump(mode="json")
+                if outcome.workspace is not None:
+                    run.workspace = str(outcome.workspace)
+                active_workspace = Path(run.workspace)
+                await self._save(run, "workflow.regression_verified")
+                if outcome.status != "accepted":
+                    run.failure_reason = (
+                        outcome.agent_result.reason
+                        or "Candidate did not pass regression acceptance"
+                    )
+                    await self._transition(run, DeliveryStage.BLOCKED)
+                    return self._result(run)
+                if outcome.agent_result.status != AgentStatus.COMPLETED:
+                    raise WorkflowError(
+                        "Accepted regression candidate has no completed Agent result"
+                    )
                 await self._transition(run, DeliveryStage.INSPECTING_CHANGES)
+
+            if run.stage in {
+                DeliveryStage.INSPECTING_CHANGES,
+                DeliveryStage.BUILDING,
+                DeliveryStage.TEST_DEPLOYING,
+            } and not await self._validate_regression(run):
+                return self._result(run)
 
             if run.stage == DeliveryStage.INSPECTING_CHANGES:
                 if run.change_snapshot is None:
@@ -200,6 +254,8 @@ class DeliveryWorkflow:
                 )
 
             if run.stage == DeliveryStage.BUILDING:
+                if not await self._validate_regression(run):
+                    return self._result(run)
                 if self.artifact_builder is None:
                     raise WorkflowError("Cannot resume build without an artifact builder")
                 if run.build_receipt is None:
@@ -215,6 +271,8 @@ class DeliveryWorkflow:
                 await self._transition(run, DeliveryStage.TEST_DEPLOYING)
 
             if run.stage == DeliveryStage.TEST_DEPLOYING:
+                if not await self._validate_regression(run):
+                    return self._result(run)
                 if run.deployment_receipt is None:
                     change_hash = str((run.change_snapshot or {}).get("change_hash", ""))
                     deployment = await self.test_publisher.publish(
@@ -264,6 +322,30 @@ class DeliveryWorkflow:
                 await self._transition(run, DeliveryStage.FAILED)
             return self._result(run)
 
+    async def _validate_regression(self, run: WorkflowRun) -> bool:
+        if run.regression_outcome is None:
+            return True
+        if self.regression_controller is not None and await (
+            self.regression_controller.validate_checkpoint(run.run_id)
+        ):
+            return True
+        run.failure_reason = "Regression evidence became stale before delivery"
+        await self._transition(run, DeliveryStage.BLOCKED)
+        return False
+
+    async def _complete_legacy_coding(
+        self, run: WorkflowRun, contract: TaskContract, workspace: Path
+    ) -> None:
+        if run.agent_result is None:
+            agent_result = await self.agent.run(contract, workspace, run_id=run.run_id)
+            run.agent_result = agent_result.model_dump(mode="json")
+            await self._save(run, "workflow.coding_completed")
+        else:
+            agent_result = AgentResult.model_validate(run.agent_result)
+        if agent_result.status != AgentStatus.COMPLETED:
+            raise WorkflowError(agent_result.reason or "Coding Agent did not complete")
+        await self._transition(run, DeliveryStage.INSPECTING_CHANGES)
+
     async def decide(self, run_id: str, approval: ApprovalRecord) -> WorkflowResult:
         payload = await self.checkpoints.load(run_id)
         if payload is None:
@@ -273,6 +355,20 @@ class DeliveryWorkflow:
             raise WorkflowError(f"Run is not awaiting approval: {run.stage}")
         if approval.subject_hash != run.approval_subject_hash:
             raise WorkflowError("Approval hash does not match the current change and evidence")
+        if approval.decision == "approved" and (
+            run.contract.get("tdd") is not None
+            or (run.regression_outcome or {}).get("tdd_evidence") is not None
+        ):
+            try:
+                current_package = self.approval_builder.build(run)
+            except ApprovalPackageError as exc:
+                raise WorkflowError("Approval subject has invalid TDD evidence") from exc
+            if current_package.subject_hash != run.approval_subject_hash:
+                raise WorkflowError("Approval subject no longer matches the TDD evidence")
+            if self.regression_controller is None or not await (
+                self.regression_controller.validate_checkpoint(run.run_id)
+            ):
+                raise WorkflowError("TDD evidence became stale before approval")
         run.approval = approval.model_dump(mode="json")
         if approval.decision == "rejected":
             run.failure_reason = f"Rejected by {approval.approver}: {approval.comment}"
@@ -351,6 +447,7 @@ class DeliveryWorkflow:
         if run.stage not in {
             DeliveryStage.COMPLETED,
             DeliveryStage.FAILED,
+            DeliveryStage.BLOCKED,
             DeliveryStage.ROLLED_BACK,
         }:
             raise WorkflowError(f"Cannot release a non-terminal workspace: {run.stage}")
@@ -438,6 +535,24 @@ class DeliveryWorkflow:
     def _result(run: WorkflowRun) -> WorkflowResult:
         evidence_refs: list[str] = []
         evidence_refs.extend(run.failure_evidence_refs)
+        if run.regression_report is not None:
+            report_path = run.regression_report.get("report_path")
+            if isinstance(report_path, str) and report_path:
+                evidence_refs.append(report_path)
+            for test in run.regression_report.get("tests", []):
+                evidence_refs.extend(
+                    value for value in test.get("evidence_refs", []) if isinstance(value, str)
+                )
+        tdd_evidence = (run.regression_outcome or {}).get("tdd_evidence")
+        if isinstance(tdd_evidence, dict):
+            red_report = tdd_evidence.get("red_report", {})
+            report_path = red_report.get("report_path")
+            if isinstance(report_path, str) and report_path:
+                evidence_refs.append(report_path)
+            for test in red_report.get("tests", []):
+                evidence_refs.extend(
+                    value for value in test.get("evidence_refs", []) if isinstance(value, str)
+                )
         if run.build_receipt is not None:
             manifest = run.build_receipt.get("manifest_ref")
             if isinstance(manifest, str):
@@ -447,7 +562,7 @@ class DeliveryWorkflow:
                 for value in run.build_receipt.get("command_evidence_refs", [])
                 if isinstance(value, str)
             )
-        for payload in (run.deployment_receipt, run.verification_report):
+        for payload in (run.regression_report, run.deployment_receipt, run.verification_report):
             if payload is not None:
                 evidence_refs.extend(
                     value for value in payload.get("evidence_refs", []) if isinstance(value, str)

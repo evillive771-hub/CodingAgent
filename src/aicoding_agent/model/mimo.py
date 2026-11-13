@@ -18,8 +18,8 @@ from aicoding_agent.model.base import (
 )
 
 
-class MimoChatModel:
-    """MiMo adapter using the OpenAI-compatible Chat Completions endpoint."""
+class OpenAICompatibleChatModel:
+    """OpenAI-compatible Chat Completions adapter for configured providers."""
 
     def __init__(
         self,
@@ -28,6 +28,7 @@ class MimoChatModel:
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._settings = settings
+        self._provider = "DeepSeek" if settings.provider == "deepseek" else "MiMo"
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(
             timeout=httpx.Timeout(settings.request_timeout_seconds)
@@ -61,7 +62,9 @@ class MimoChatModel:
                 )
             except httpx.HTTPError as exc:
                 if attempt >= self._settings.max_retries:
-                    raise ModelTransientError(f"MiMo request failed: {type(exc).__name__}") from exc
+                    raise ModelTransientError(
+                        f"{self._provider} request failed: {type(exc).__name__}"
+                    ) from exc
                 await asyncio.sleep(0.5 * (2**attempt))
                 continue
 
@@ -69,32 +72,37 @@ class MimoChatModel:
                 break
             if response.status_code in {401, 403}:
                 raise ModelAuthenticationError(
-                    f"MiMo rejected model credentials: HTTP {response.status_code}"
+                    f"{self._provider} rejected model credentials: HTTP {response.status_code}"
                 )
             if response.status_code not in {408, 429, 500, 502, 503, 504}:
                 if response.status_code in {400, 413} and _is_prompt_too_long(response):
                     raise ModelPromptTooLongError(
-                        f"MiMo rejected an oversized prompt: HTTP {response.status_code}"
+                        f"{self._provider} rejected an oversized prompt: "
+                        f"HTTP {response.status_code}"
                     )
-                raise ModelRequestError(f"MiMo returned HTTP {response.status_code}")
+                raise ModelRequestError(f"{self._provider} returned HTTP {response.status_code}")
             if attempt >= self._settings.max_retries:
                 if response.status_code == 429:
                     raise ModelRateLimitError(
-                        "MiMo remained rate limited: HTTP 429",
+                        f"{self._provider} remained rate limited: HTTP 429",
                         retry_after_seconds=_retry_after_seconds(response),
                     )
-                raise ModelTransientError(f"MiMo remained unavailable: HTTP {response.status_code}")
+                raise ModelTransientError(
+                    f"{self._provider} remained unavailable: HTTP {response.status_code}"
+                )
             await asyncio.sleep(0.5 * (2**attempt))
 
         if response is None:
-            raise ModelTransientError("MiMo request did not produce a response")
+            raise ModelTransientError(f"{self._provider} request did not produce a response")
 
         try:
             body = response.json()
             choice = body["choices"][0]
             message = choice["message"]
         except (ValueError, KeyError, IndexError, TypeError) as exc:
-            raise ModelProtocolError("MiMo response is missing choices[0].message") from exc
+            raise ModelProtocolError(
+                f"{self._provider} response is missing choices[0].message"
+            ) from exc
 
         tool_calls: list[ToolCall] = []
         for raw_call in message.get("tool_calls") or []:
@@ -114,7 +122,7 @@ class MimoChatModel:
                     )
                 )
             except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-                raise ModelProtocolError("MiMo returned an invalid tool call") from exc
+                raise ModelProtocolError(f"{self._provider} returned an invalid tool call") from exc
 
         usage = body.get("usage") or {}
         numeric_usage = {
@@ -131,6 +139,10 @@ class MimoChatModel:
     async def aclose(self) -> None:
         if self._owns_client:
             await self._client.aclose()
+
+
+class MimoChatModel(OpenAICompatibleChatModel):
+    """Backward-compatible name for the original MiMo adapter."""
 
 
 def _retry_after_seconds(response: httpx.Response) -> float | None:

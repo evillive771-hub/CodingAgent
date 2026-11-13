@@ -1,0 +1,1 @@
+{"command_suites": "command-suites.json", "require_both": true, "require_tdd": true, "infra_retries": 1}

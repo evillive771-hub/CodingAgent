@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from aicoding_agent.domain.models import TaskContract, ToolRisk
 
 if TYPE_CHECKING:
+    from aicoding_agent.adapters.browser_tests import BrowserTestRunner
     from aicoding_agent.agent.background import BackgroundTaskManager
     from aicoding_agent.agent.memory import MemoryManager
     from aicoding_agent.agent.plan import PlanManager
@@ -56,6 +57,10 @@ class ToolContext:
         history_store: HistoryStore | None = None,
         history_scope_id: str | None = None,
         team_launch_manager: TeamLaunchManager | None = None,
+        browser_runner: BrowserTestRunner | None = None,
+        deadline_at: float | None = None,
+        shared_budget: Any = None,
+        tdd_proposal_mode: bool = False,
     ) -> None:
         self.workspace = workspace.resolve()
         self.contract = contract
@@ -70,10 +75,16 @@ class ToolContext:
         self.history_store = history_store
         self.history_scope_id = history_scope_id
         self.team_launch_manager = team_launch_manager
+        self.browser_runner = browser_runner
+        self.deadline_at = deadline_at
+        self.shared_budget = shared_budget
+        self.tdd_proposal_mode = tdd_proposal_mode
         self.state: dict[str, Any] = {
             "operation_sequence": 0,
             "last_mutation_sequence": 0,
             "verification_success": {},
+            "browser_verification_results": {},
+            "browser_verification_runs": {},
             "coding_outcome": None,
             "user_question": None,
         }

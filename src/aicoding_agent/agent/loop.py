@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from aicoding_agent.adapters.browser_tests import BrowserTestRunner
 from aicoding_agent.agent.background import BackgroundStatus, BackgroundTaskManager
 from aicoding_agent.agent.control import ControlIntent, SteeringInbox
 from aicoding_agent.agent.gate import CompletionGate, GateAction
@@ -37,12 +40,107 @@ from aicoding_agent.domain.models import (
 )
 from aicoding_agent.model.base import ChatModel, ModelError
 from aicoding_agent.persistence.base import EventSink, NullEventSink
+from aicoding_agent.persistence.jsonl import AtomicCheckpointStore
 from aicoding_agent.skills import SkillCatalog, SkillCatalogError
 from aicoding_agent.tools.base import ToolContext
 from aicoding_agent.tools.executor import ToolExecutor
 
 
 class AgentLoop:
+    async def propose_tests(
+        self,
+        contract: TaskContract,
+        workspace: Path,
+        *,
+        run_id: str | None = None,
+        shared_budget: Any = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Produce a bounded test draft with an isolated, read-only stage registry."""
+        from aicoding_agent.tools.base import ToolRegistry
+        from aicoding_agent.tools.builtin import ListFilesTool, ReadFileTool, SearchTextTool
+        from aicoding_agent.tools.tdd import SubmitTestProposalTool, TddProposal
+
+        registry = ToolRegistry()
+        for tool in (ReadFileTool(), ListFilesTool(), SearchTextTool(), SubmitTestProposalTool()):
+            registry.register(tool)
+        stage_contract = contract.model_copy(update={"allowed_tools": registry.names})
+        run_id = run_id or uuid4().hex
+        context = ToolContext(
+            workspace=workspace,
+            contract=stage_contract,
+            run_id=run_id,
+            shared_budget=shared_budget,
+            tdd_proposal_mode=True,
+            emit=lambda event, data: self.event_sink.emit(run_id, event, data),
+        )
+        executor = ToolExecutor(registry, policy=self.executor.policy)
+        messages: list[dict[str, Any]] = [
+            {
+                "role": "system",
+                "content": (
+                    "You are preparing TDD tests only. Read the workspace "
+                    "and submit a test proposal. "
+                    "Do not implement or modify business code. Reuse existing tests when possible. "
+                    "Test drafts must be under tests/, with test_*.py, *.test.* or *.spec.* names. "
+                    "red_cases maps host suite IDs to exact failing case IDs. "
+                    "requirement_links maps "
+                    "each case ID to its zero-based acceptance criterion index. Tests must assert "
+                    "the requested behavior, not deliberately break code or weaken existing tests. "
+                    "The host will review and freeze the proposal before running RED."
+                ),
+            },
+            {"role": "user", "content": contract.model_dump_json()},
+        ]
+        deadline = time.monotonic() + contract.budget.max_elapsed_seconds
+        tool_count = 0
+        await self.event_sink.emit(run_id, "tdd.proposal_started", {})
+        for _ in range(contract.budget.max_turns):
+            if shared_budget is not None:
+                await shared_budget.charge_turn()
+            remaining = min(
+                deadline - time.monotonic(),
+                shared_budget.remaining_seconds if shared_budget else float("inf"),
+            )
+            if remaining <= 0:
+                raise TimeoutError("Test proposal time budget exhausted")
+            async with asyncio.timeout(remaining):
+                response = await self.model.complete(messages, registry.definitions())
+                messages.append(
+                    self._assistant_message(
+                        response.content, response.reasoning_content, response.tool_calls
+                    )
+                )
+                for call in response.tool_calls:
+                    tool_count += 1
+                    if tool_count > contract.budget.max_tool_calls:
+                        raise RuntimeError("Test proposal tool budget exhausted")
+                    if shared_budget is not None:
+                        await shared_budget.charge_tools()
+                    result = await executor.execute(call, context)
+                    messages.append(
+                        {"role": "tool", "tool_call_id": call.id, "content": result.output}
+                    )
+                    if context.state.get("test_proposal") is not None:
+                        proposal = TddProposal.model_validate(context.state["test_proposal"])
+                        await self.event_sink.emit(
+                            run_id,
+                            "tdd.proposal_submitted",
+                            {
+                                "files": [item.path for item in proposal.files],
+                                "red_cases": proposal.red_cases,
+                            },
+                        )
+                        return proposal
+            if not response.tool_calls:
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": "Submit the test proposal using submit_test_proposal.",
+                    }
+                )
+        raise RuntimeError("Test proposal turn budget exhausted")
+
     def __init__(
         self,
         *,
@@ -61,6 +159,7 @@ class AgentLoop:
         memory_manager: MemoryManager | None = None,
         context_compactor: AgentContextCompactor | None = None,
         team_launch_manager: TeamLaunchManager | None = None,
+        browser_runner: BrowserTestRunner | None = None,
     ) -> None:
         self.model = model
         self.executor = executor
@@ -77,6 +176,7 @@ class AgentLoop:
         self.memory_manager = memory_manager
         self.context_compactor = context_compactor
         self.team_launch_manager = team_launch_manager
+        self.browser_runner = browser_runner
 
     async def run(
         self,
@@ -94,13 +194,87 @@ class AgentLoop:
         message_journal: SessionMessageJournal | None = None,
         resume_messages: list[dict[str, Any]] | None = None,
         history_scope_id: str | None = None,
+        shared_budget: Any = None,
+        tdd_authorized: bool = False,
     ) -> AgentResult:
         resolved_workspace = workspace.resolve()
         if not resolved_workspace.is_dir():
             raise ValueError(f"Workspace does not exist: {resolved_workspace}")
         run_id = run_id or uuid4().hex
+        if contract.tdd is not None and not tdd_authorized:
+            result = AgentResult(status=AgentStatus.BLOCKED, run_id=run_id,
+                                 reason="TDD coding requires host-verified RED evidence")
+            await self.event_sink.emit(run_id, "agent.blocked", {"reason": result.reason})
+            return result
         background_manager = background_manager or self.background_manager
         started_at = time.monotonic()
+        initial_deadline_epoch = datetime.now(UTC).timestamp() + contract.budget.max_elapsed_seconds
+        browser_budget_store: AtomicCheckpointStore | None = None
+        browser_budget: dict[str, Any] = {}
+        if contract.browser_verifications:
+            try:
+                if self.browser_runner is None:
+                    raise ValueError("Browser verification requires a host --browser-suites config")
+                await self.browser_runner.freeze(resolved_workspace)
+                if "run_playwright" not in contract.allowed_tools:
+                    raise ValueError(
+                        "Browser verification requires run_playwright in allowed_tools"
+                    )
+                for verification in contract.browser_verifications:
+                    if not self.browser_runner.has_suite(verification.suite_ref):
+                        raise ValueError(f"Unregistered browser suite: {verification.suite_ref}")
+                await self.executor.enable_browser_guard(resolved_workspace)
+                suite_fingerprints = self.browser_runner.frozen_suite_fingerprints(
+                    resolved_workspace
+                )
+                browser_budget_store = (
+                    AtomicCheckpointStore(self.browser_runner.evidence_root / "budgets")
+                    if shared_budget is None
+                    else None
+                )
+                previous_budget = (
+                    await browser_budget_store.load(run_id) if browser_budget_store else None
+                )
+                if previous_budget is not None:
+                    if previous_budget.get("workspace") != str(resolved_workspace) or (
+                        previous_budget.get("suite_fingerprints") != suite_fingerprints
+                    ):
+                        raise ValueError(
+                            "Resumed browser run cannot replace its workspace or suite"
+                        )
+                    if previous_budget["browser_verifications"] != [
+                        item.model_dump(mode="json") for item in contract.browser_verifications
+                    ] or previous_budget["budget"] != contract.budget.model_dump(mode="json"):
+                        raise ValueError("Resumed browser run cannot replace its tests or budget")
+                    browser_budget = previous_budget
+                    remaining = (
+                        float(browser_budget["deadline_epoch"]) - datetime.now(UTC).timestamp()
+                    )
+                    started_at = time.monotonic() - (
+                        contract.budget.max_elapsed_seconds - remaining
+                    )
+                else:
+                    browser_budget = {
+                        "deadline_epoch": initial_deadline_epoch,
+                        "turns": 0,
+                        "tool_calls": 0,
+                        "workspace": str(resolved_workspace),
+                        "suite_fingerprints": suite_fingerprints,
+                        "budget": contract.budget.model_dump(mode="json"),
+                        "browser_verifications": [
+                            item.model_dump(mode="json") for item in contract.browser_verifications
+                        ],
+                    }
+                    if browser_budget_store is not None:
+                        await browser_budget_store.save(run_id, browser_budget)
+            except (ValueError, OSError, RuntimeError, KeyError, TypeError) as exc:
+                result = AgentResult(
+                    status=AgentStatus.FAILED,
+                    run_id=run_id,
+                    reason=f"Browser verification configuration failed: {exc}",
+                )
+                await self.event_sink.emit(run_id, "agent.failed", result.model_dump(mode="json"))
+                return result
         recovery = self.recovery_controller.new_session()
         skill_catalog: SkillCatalog | None = None
         if "load_skill" in contract.allowed_tools:
@@ -135,6 +309,13 @@ class AgentLoop:
             ),
             history_scope_id=history_scope_id or run_memory_scope(run_id),
             team_launch_manager=self.team_launch_manager,
+            browser_runner=self.browser_runner,
+            deadline_at=(
+                shared_budget.deadline_at
+                if shared_budget is not None
+                else started_at + contract.budget.max_elapsed_seconds
+            ),
+            shared_budget=shared_budget,
         )
         if plan_manager is not None:
             await plan_manager.initialize()
@@ -219,11 +400,19 @@ class AgentLoop:
         messages.extend(
             {"role": "user", "content": message} for message in prompt_hooks.inject_messages
         )
-        tool_definitions = self.executor.registry.definitions(contract.allowed_tools)
-        turns = 0
-        tool_call_count = 0
+        exposed_tools = set(contract.allowed_tools)
+        if not contract.browser_verifications:
+            exposed_tools.discard("run_playwright")
+        tool_definitions = self.executor.registry.definitions(exposed_tools)
+        turns = int(browser_budget.get("turns", 0))
+        tool_call_count = int(browser_budget.get("tool_calls", 0))
         stop_blocks = 0
         budget_warning_emitted = False
+
+        async def persist_browser_budget() -> None:
+            if browser_budget_store is not None:
+                browser_budget.update(turns=turns, tool_calls=tool_call_count)
+                await browser_budget_store.save(run_id, browser_budget)
 
         await self.event_sink.emit(
             run_id,
@@ -265,6 +454,14 @@ class AgentLoop:
                     run_id, turns, tool_call_count, "Maximum elapsed time reached"
                 )
             turns += 1
+            if shared_budget is not None:
+                from aicoding_agent.regression.budget import RegressionBudgetExceeded
+
+                try:
+                    await shared_budget.charge_turn()
+                except RegressionBudgetExceeded as exc:
+                    return await self._budget_result(run_id, turns, tool_call_count, str(exc))
+            await persist_browser_budget()
             await self.event_sink.emit(run_id, "agent.turn_started", {"turn": turns})
             remaining_turns = contract.budget.max_turns - turns + 1
             if remaining_turns <= 3 and not budget_warning_emitted:
@@ -405,15 +602,26 @@ class AgentLoop:
                     },
                 )
                 model_started_at = time.monotonic()
-                response = await recovery.complete(
-                    self.model,
-                    model_messages,
-                    tool_definitions,
-                    emit=lambda event_type, data, turn=turns: self.event_sink.emit(
-                        run_id,
-                        event_type,
-                        {"turn": turn, **data},
-                    ),
+                timeout = (
+                    max(0, tool_context.deadline_at - time.monotonic())
+                    if (contract.browser_verifications or shared_budget is not None)
+                    and tool_context.deadline_at is not None
+                    else None
+                )
+                async with asyncio.timeout(timeout):
+                    response = await recovery.complete(
+                        self.model,
+                        model_messages,
+                        tool_definitions,
+                        emit=lambda event_type, data, turn=turns: self.event_sink.emit(
+                            run_id,
+                            event_type,
+                            {"turn": turn, **data},
+                        ),
+                    )
+            except TimeoutError:
+                return await self._budget_result(
+                    run_id, turns, tool_call_count, "Task time budget exhausted during model call"
                 )
             except ModelError as exc:
                 await self.event_sink.emit(
@@ -454,6 +662,7 @@ class AgentLoop:
             if self._has_current_control(control):
                 if response.tool_calls:
                     tool_call_count += len(response.tool_calls)
+                    await persist_browser_budget()
                     messages.extend(
                         self._tool_messages(
                             [
@@ -483,16 +692,33 @@ class AgentLoop:
                 continue
 
             if response.tool_calls:
+                if shared_budget is not None:
+                    try:
+                        await shared_budget.charge_tools(len(response.tool_calls))
+                    except RegressionBudgetExceeded as exc:
+                        return await self._budget_result(run_id, turns, tool_call_count, str(exc))
                 if tool_call_count + len(response.tool_calls) > contract.budget.max_tool_calls:
                     return await self._budget_result(
                         run_id, turns, tool_call_count, "Maximum tool call budget reached"
                     )
                 tool_call_count += len(response.tool_calls)
-                results, control_pending = await self._execute_tool_calls(
-                    response.tool_calls,
-                    tool_context,
-                    control=control,
-                )
+                await persist_browser_budget()
+                try:
+                    async with asyncio.timeout(
+                        shared_budget.remaining_seconds if shared_budget is not None else None
+                    ):
+                        results, control_pending = await self._execute_tool_calls(
+                            response.tool_calls,
+                            tool_context,
+                            control=control,
+                        )
+                except TimeoutError:
+                    return await self._budget_result(
+                        run_id,
+                        turns,
+                        tool_call_count,
+                        "Task time budget exhausted during tools",
+                    )
                 messages.extend(self._tool_messages(results))
                 await persist_new_messages(f"round-{turns}-tool-results")
                 await self.hook_bus.trigger(
@@ -518,6 +744,19 @@ class AgentLoop:
                     if control_result is not None:
                         return control_result
                     continue
+                browser_terminal = tool_context.state.get("browser_terminal_status")
+                if browser_terminal:
+                    result = AgentResult(
+                        status=AgentStatus(browser_terminal),
+                        run_id=run_id,
+                        turns=turns,
+                        tool_calls=tool_call_count,
+                        reason=tool_context.state.get("browser_terminal_reason"),
+                    )
+                    await self.event_sink.emit(
+                        run_id, f"agent.{result.status.value}", result.model_dump(mode="json")
+                    )
+                    return result
                 circuit = recovery.observe_tool_results(response.tool_calls, results)
                 if circuit is not None:
                     await self.event_sink.emit(
@@ -557,9 +796,7 @@ class AgentLoop:
                 # A submission requests host validation in this turn, even at the budget
                 # boundary. Evaluate only after the whole batch has settled: later edits
                 # can invalidate the submitted outcome and its verification evidence.
-                if not any(
-                    result.ok and result.tool_name == "submit_result" for result in results
-                ):
+                if not any(result.ok and result.tool_name == "submit_result" for result in results):
                     continue
 
             stop_hooks = await self.hook_bus.trigger(
@@ -574,6 +811,7 @@ class AgentLoop:
             if stop_hooks.continue_message:
                 messages.append({"role": "user", "content": stop_hooks.continue_message})
                 continue
+            await self.completion_gate.refresh_browser_evidence(tool_context)
             decision = self.completion_gate.evaluate(contract, tool_context)
             await self.event_sink.emit(
                 run_id,
@@ -609,16 +847,42 @@ class AgentLoop:
                 return result
 
             if decision.action == GateAction.COMPLETE:
+                if contract.browser_verifications and (
+                    time.monotonic() - started_at >= contract.budget.max_elapsed_seconds
+                ):
+                    return await self._budget_result(
+                        run_id,
+                        turns,
+                        tool_call_count,
+                        "Task time budget exhausted before completion",
+                    )
                 outcome = tool_context.state.get("coding_outcome")
-                deterministic_authoritative = bool(contract.verification_commands) and (
-                    int(tool_context.state.get("last_mutation_sequence", 0)) > 0
-                    or bool(outcome.changed_files)
-                )
+                deterministic_authoritative = (
+                    bool(contract.verification_commands)
+                    and (
+                        int(tool_context.state.get("last_mutation_sequence", 0)) > 0
+                        or bool(outcome.changed_files)
+                    )
+                ) or any(item.required for item in contract.browser_verifications)
                 if self.goal_evaluator is not None:
                     goal_started_at = time.monotonic()
                     try:
-                        goal_result = await self.goal_evaluator.evaluate(
-                            self._goal_input(contract, tool_context)
+                        goal_timeout = (
+                            max(0, tool_context.deadline_at - time.monotonic())
+                            if contract.browser_verifications
+                            and tool_context.deadline_at is not None
+                            else None
+                        )
+                        async with asyncio.timeout(goal_timeout):
+                            goal_result = await self.goal_evaluator.evaluate(
+                                self._goal_input(contract, tool_context)
+                            )
+                    except TimeoutError:
+                        return await self._budget_result(
+                            run_id,
+                            turns,
+                            tool_call_count,
+                            "Task time budget exhausted during goal evaluation",
                         )
                     except GoalEvaluationError as exc:
                         if deterministic_authoritative:
@@ -727,6 +991,13 @@ class AgentLoop:
                                     }
                                 )
                                 continue
+                # The semantic evaluator may take time: check browser input again before
+                # accepting the outcome, including edits made outside model tools.
+                await self.completion_gate.refresh_browser_evidence(tool_context)
+                final_decision = self.completion_gate.evaluate(contract, tool_context)
+                if final_decision.action != GateAction.COMPLETE:
+                    messages.append({"role": "user", "content": final_decision.reason})
+                    continue
                 result = AgentResult(
                     status=AgentStatus.COMPLETED,
                     run_id=run_id,
@@ -951,6 +1222,28 @@ class AgentLoop:
                 f"Verification succeeded at operation sequence {sequence}"
             )
             host_evidence_ids.append(f"verification:{command_id}")
+        browser_results = context.state.get("browser_verification_results", {})
+        for verification_id, result in list(browser_results.items())[:200]:
+            if verification_success.get(verification_id, 0) <= last_mutation:
+                continue
+            if result.status != "passed":
+                continue
+            evidence_id = f"browser:{verification_id}"
+            evidence[evidence_id] = json.dumps(
+                {
+                    "status": result.status,
+                    "attempt_id": result.attempt_id,
+                    "executed": result.executed,
+                    "passed": result.passed,
+                    "failed": result.failed,
+                    "input_fingerprint": result.input_fingerprint,
+                    "suite_fingerprint": result.suite_fingerprint,
+                    "report_hash": result.report_hash,
+                    "evidence_refs": [str(ref)[:500] for ref in result.evidence_refs[:5]],
+                },
+                ensure_ascii=False,
+            )
+            host_evidence_ids.append(evidence_id)
         for evidence_id, excerpt in context.state.get("file_observations", {}).items():
             evidence[evidence_id] = excerpt
             host_evidence_ids.append(evidence_id)

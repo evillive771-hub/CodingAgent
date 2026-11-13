@@ -3,6 +3,7 @@
 .uv-cache/
 .pytest_cache/
 .test-tmp/
+.test-tmp-*/
 .ruff_cache/
 __pycache__/
 *.py[cod]
@@ -21,3 +22,5 @@ artifacts/
 .aicoding-agent/
 /runtime/
 .workbuddy-ai/
+
+gcm-diagnose.log

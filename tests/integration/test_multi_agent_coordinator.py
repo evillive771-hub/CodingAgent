@@ -1,4 +1,5 @@
 import asyncio
+import sys
 from pathlib import Path
 
 import pytest
@@ -26,8 +27,12 @@ from aicoding_agent.domain.models import (
     AgentStatus,
     CodingOutcome,
     TaskContract,
+    TddSpec,
     VerificationCommand,
 )
+from aicoding_agent.regression.budget import RegressionBudget
+from aicoding_agent.regression.controller import RegressionController
+from aicoding_agent.regression.gate import CommandSuite, RegressionGate, RegressionReport
 
 
 async def git(workspace: Path, *args: str) -> str:
@@ -54,6 +59,297 @@ async def create_repository(path: Path) -> str:
     await git(path, "add", ".")
     await git(path, "commit", "-m", "baseline")
     return await git(path, "rev-parse", "HEAD")
+
+
+@pytest.mark.asyncio
+async def test_coordinator_cannot_silently_ignore_required_tdd_without_controller(tmp_path):
+    repository = tmp_path / "repository"
+    await create_repository(repository)
+    graph = TaskGraphManager(scope_id="tdd-missing-controller")
+    await graph.replace([TaskNode(task_id="first", title="Edit a")])
+    calls = []
+
+    class Worker:
+        async def run(self, contract, workspace, *, run_id):
+            calls.append("worker")
+            raise AssertionError("Business code must not be opened before RED")
+
+    coordinator = MultiAgentCoordinator(
+        workspace_manager=LocalGitWorktreeManager(tmp_path / "worktrees"),
+        inspector=GitChangeInspector(),
+        integrator=GitCandidateIntegrator(safe_hooks_dir=tmp_path / "hooks"),
+        mailbox=CoordinatorMailboxStore(tmp_path / "mailbox"), max_workers=1,
+    )
+    contract = task_contract("first").model_copy(
+        update={"tdd": TddSpec(red_cases={"tests": ["test_requirement"]})}
+    )
+    result = await coordinator.run(
+        coordinator_id="tdd-missing-controller", repository=repository, task_graph=graph,
+        task_contracts={"first": contract}, agent_factory=lambda _: Worker(),
+    )
+    assert calls == []
+    assert result.blocked_tasks == ["first"]
+    assert "TDD" in result.candidates[0].failure_reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("red_mode", ["valid", "already_satisfied", "infra_error"])
+async def test_coordinator_real_requirement_red_green_accepts_pair(tmp_path, red_mode):
+    repository = tmp_path / "repository"
+    initial_revision = await create_repository(repository)
+    if red_mode == "already_satisfied":
+        (repository / "a.txt").write_text("a1\n", encoding="utf-8")
+        await git(repository, "add", ".")
+        await git(repository, "commit", "-m", "Already implemented")
+        initial_revision = await git(repository, "rev-parse", "HEAD")
+    host = tmp_path / "host-tests"
+    host.mkdir()
+    test_file = host / "test_requirement.py"
+    test_file.write_text(
+        "import os\nfrom pathlib import Path\n"
+        "def test_feature():\n"
+        "    root = Path(os.environ['REGRESSION_WORKSPACE'])\n"
+        "    assert (root / 'a.txt').read_text() == 'a1\\n'\n", encoding="utf-8",
+    )
+    if red_mode == "infra_error":
+        test_file.write_text(
+            "raise RuntimeError('test environment unavailable')\n", encoding="utf-8",
+        )
+    suite = CommandSuite(
+        id="requirement", command=[sys.executable, "-m", "pytest", str(test_file), "-q"],
+        cwd=host, test_files=[test_file], reporter="pytest_junit",
+        expected_tests=["test_requirement::test_feature"],
+    )
+    controller = RegressionController(
+        tmp_path / "regression", RegressionGate(tmp_path / "evidence", command_suites=[suite]),
+    )
+    graph = TaskGraphManager(scope_id="actual-tdd")
+    await graph.replace([TaskNode(task_id="first", title="Edit a")])
+    contract = task_contract("first").model_copy(update={
+        "verification_commands": [VerificationCommand(id="requirement", program="python",
+                                                       args=["verify.py"])],
+        "tdd": TddSpec(red_cases={"requirement": ["test_requirement::test_feature"]}),
+    })
+    active = {"current": 0, "maximum": 0}
+    coordinator = MultiAgentCoordinator(
+        workspace_manager=LocalGitWorktreeManager(tmp_path / "worktrees"),
+        inspector=GitChangeInspector(),
+        integrator=GitCandidateIntegrator(safe_hooks_dir=tmp_path / "hooks"),
+        mailbox=CoordinatorMailboxStore(tmp_path / "mailbox"), max_workers=1,
+        regression_controller=controller,
+    )
+    result = await coordinator.run(
+        coordinator_id="actual-tdd", repository=repository, task_graph=graph,
+        task_contracts={"first": contract}, agent_factory=lambda _: EditingAgent(
+            {"first": ("a.txt", "a0\n", "a1\n")}, active, asyncio.Lock(),
+        ),
+    )
+    if red_mode != "valid":
+        assert result.blocked_tasks == ["first"]
+        assert active["maximum"] == 0
+        assert result.integration_revision == initial_revision
+        assert (await controller.store.current()).verified is False
+        return
+    assert result.completed_tasks == ["first"], result.candidates[0].failure_reason
+    candidate = result.candidates[0]
+    assert candidate.tdd_evidence["red_report"]["status"] == "assertion_failed"
+    assert candidate.regression_report["status"] == "passed"
+    assert (Path(candidate.tdd_evidence["baseline_path"]) / "a.txt").read_text() == "a0\n"
+    assert (Path(result.integration_lease.path) / "a.txt").read_text() == "a1\n"
+    assert (repository / "a.txt").read_text() == "a0\n"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("red_failure", [None, "target passed", "browser unavailable"])
+async def test_coordinator_requires_red_before_worker_and_keeps_proof_for_combination(
+    tmp_path, red_failure
+):
+    repository = tmp_path / "repository"
+    initial_revision = await create_repository(repository)
+    graph = TaskGraphManager(scope_id="tdd-coordinator")
+    await graph.replace([TaskNode(task_id="first", title="Edit a")])
+    events = []
+    proof = {"baseline_path": str(repository), "red": "assertion_failed"}
+
+    class TddController:
+        async def budget_for(self, run_id, contract):
+            return await RegressionBudget.initialize(tmp_path / "budgets", run_id, contract.budget)
+
+        async def prepare_tdd(self, contract, workspace, *, run_id, **kwargs):
+            assert (workspace / "a.txt").read_text(encoding="utf-8") == "a0\n"
+            events.append("red")
+            if red_failure:
+                raise RuntimeError(red_failure)
+            return proof
+
+        async def verify_combination(self, **kwargs):
+            assert kwargs["tdd_evidence"] is proof
+            events.append("green")
+            return RegressionReport(run_id=kwargs["run_id"], attempt_id="combination",
+                                    registry_version=0, registry_fingerprint="a" * 64,
+                                    status="passed")
+
+        async def validate_combination(self, **kwargs):
+            return True
+
+        async def record_combination_acceptance(self, *, before_publish, **kwargs):
+            assert kwargs["tdd_evidence"] is proof
+            events.append("accept")
+            await before_publish()
+
+    class Worker:
+        async def run(self, contract, workspace, *, run_id, **kwargs):
+            assert events == ["red"]
+            events.append("code")
+            (workspace / "a.txt").write_text("a1\n", encoding="utf-8")
+            return AgentResult(status=AgentStatus.COMPLETED, run_id=run_id,
+                               outcome=CodingOutcome(summary="Fixed", changed_files=["a.txt"]))
+
+    coordinator = MultiAgentCoordinator(
+        workspace_manager=LocalGitWorktreeManager(tmp_path / "worktrees"),
+        inspector=GitChangeInspector(),
+        integrator=GitCandidateIntegrator(safe_hooks_dir=tmp_path / "hooks"),
+        mailbox=CoordinatorMailboxStore(tmp_path / "mailbox"),
+        max_workers=1, regression_controller=TddController(),
+    )
+    result = await coordinator.run(
+        coordinator_id="tdd-coordinator", repository=repository, task_graph=graph,
+        task_contracts={"first": task_contract("first")}, agent_factory=lambda _: Worker(),
+    )
+    if red_failure:
+        assert events == ["red"]
+        assert result.blocked_tasks == ["first"]
+        assert result.integration_revision == initial_revision
+        assert red_failure in result.candidates[0].failure_reason
+    else:
+        assert events == ["red", "code", "green", "accept"]
+        assert result.completed_tasks == ["first"]
+        assert result.candidates[0].tdd_evidence == proof
+
+
+@pytest.mark.asyncio
+async def test_coordinator_requires_nonempty_red_evidence_when_tdd_requested(tmp_path):
+    repository = tmp_path / "repository"
+    await create_repository(repository)
+    graph = TaskGraphManager(scope_id="tdd-empty-proof")
+    await graph.replace([TaskNode(task_id="first", title="Edit a")])
+    called = []
+
+    class EmptyController:
+        async def budget_for(self, run_id, contract):
+            return None
+
+        async def prepare_tdd(self, *args, **kwargs):
+            return None
+
+    class Worker:
+        async def run(self, *args, **kwargs):
+            called.append(True)
+            raise AssertionError("Missing proof cannot open business writes")
+
+    coordinator = MultiAgentCoordinator(
+        workspace_manager=LocalGitWorktreeManager(tmp_path / "worktrees"),
+        inspector=GitChangeInspector(),
+        integrator=GitCandidateIntegrator(safe_hooks_dir=tmp_path / "hooks"),
+        mailbox=CoordinatorMailboxStore(tmp_path / "mailbox"), max_workers=1,
+        regression_controller=EmptyController(),
+    )
+    contract = task_contract("first").model_copy(
+        update={"tdd": TddSpec(red_cases={"tests": ["test_requirement"]})}
+    )
+    result = await coordinator.run(
+        coordinator_id="tdd-empty-proof", repository=repository, task_graph=graph,
+        task_contracts={"first": contract}, agent_factory=lambda _: Worker(),
+    )
+    assert called == []
+    assert result.blocked_tasks == ["first"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_mode", ["assertion", "stale", "acceptance_refused"])
+async def test_combined_regression_blocks_second_independently_valid_candidate(
+    tmp_path, failure_mode
+):
+    stale_evidence = failure_mode == "stale"
+    acceptance_refused = failure_mode == "acceptance_refused"
+    repository = tmp_path / "repository"
+    initial_revision = await create_repository(repository)
+    graph = TaskGraphManager(scope_id="combined-regression")
+    await graph.replace([
+        TaskNode(task_id="first", title="Edit a"),
+        TaskNode(task_id="second", title="Edit b"),
+    ])
+    observations = []
+    accepted = []
+
+    class CombinationController:
+        async def budget_for(self, run_id, contract):
+            from aicoding_agent.regression.budget import RegressionBudget
+            return await RegressionBudget.initialize(tmp_path / "budgets", run_id, contract.budget)
+
+        async def verify_combination(self, *, workspace, source_workspace, contract, run_id,
+                                     expected_revision, budget_run_id):
+            assert run_id == f"{budget_run_id}-combination"
+            assert await git(source_workspace, "rev-parse", "HEAD") == expected_revision
+            values = [(workspace / path).read_text(encoding="utf-8")
+                      for path in ("a.txt", "b.txt")]
+            observations.append(values)
+            failed = values == ["a1\n", "b1\n"]
+            return RegressionReport(
+                run_id=run_id, attempt_id="combined", registry_version=len(accepted),
+                registry_fingerprint="a" * 64,
+                status="assertion_failed" if failed else "passed",
+                reason="The features conflict when combined" if failed else None,
+            )
+
+        async def validate_combination(self, **kwargs):
+            return not stale_evidence
+
+        async def record_combination_acceptance(
+            self, *, workspace, contract, report, run_id, before_publish
+        ):
+            if acceptance_refused:
+                raise RuntimeError("Historical registry changed before acceptance")
+            await before_publish()
+            accepted.append(contract.task_id)
+
+    active = {"current": 0, "maximum": 0}
+    ready = asyncio.Event()
+    edits = {"first": ("a.txt", "a0\n", "a1\n"),
+             "second": ("b.txt", "b0\n", "b1\n")}
+    coordinator = MultiAgentCoordinator(
+        workspace_manager=LocalGitWorktreeManager(tmp_path / "worktrees"),
+        inspector=GitChangeInspector(),
+        integrator=GitCandidateIntegrator(safe_hooks_dir=tmp_path / "hooks"),
+        mailbox=CoordinatorMailboxStore(tmp_path / "mailbox"),
+        max_workers=2, regression_controller=CombinationController(),
+    )
+    result = await coordinator.run(
+        coordinator_id="combined-regression", repository=repository, task_graph=graph,
+        task_contracts={key: task_contract(key) for key in edits},
+        agent_factory=lambda _: EditingAgent(
+            edits, active, asyncio.Lock(), parallel_tasks=set(edits), parallel_ready=ready
+        ),
+    )
+    refused = stale_evidence or acceptance_refused
+    assert len(result.completed_tasks) == (0 if refused else 1)
+    assert len(result.blocked_tasks) == (2 if refused else 1)
+    assert len(accepted) == (0 if refused else 1)
+    if not refused:
+        assert observations[-1] == ["a1\n", "b1\n"]
+    else:
+        assert result.integration_revision == initial_revision
+    integration = Path(result.integration_lease.path)
+    assert [(integration / path).read_text(encoding="utf-8") for path in ("a.txt", "b.txt")] != (
+        ["a1\n", "b1\n"]
+    )
+    blocked = next(item for item in result.candidates if item.status == "blocked")
+    if stale_evidence:
+        assert "stale" in blocked.failure_reason
+    elif acceptance_refused:
+        assert "registry changed" in blocked.failure_reason
+    else:
+        assert blocked.regression_report["status"] == "assertion_failed"
 
 
 def task_contract(task_id: str) -> TaskContract:

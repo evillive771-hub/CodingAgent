@@ -1,0 +1,11 @@
+{
+  "task_id": "browser-feedback-counter",
+  "objective": "修复 counter.js：减一不能让计数器小于 0，同时保留正常加一和减一行为。",
+  "acceptance_criteria": ["计数为 0 时点击减一仍为 0", "正数计数的加一和减一正常"],
+  "allowed_tools": ["read_file", "list_files", "search_text", "apply_text_patch", "run_playwright", "submit_result"],
+  "browser_verifications": [{
+    "id": "counter-e2e", "suite_ref": "counter-public", "required": true,
+    "timeout_seconds": 120, "max_runs": 6, "max_failures_returned": 5
+  }],
+  "budget": {"max_turns": 15, "max_tool_calls": 40, "max_elapsed_seconds": 600}
+}

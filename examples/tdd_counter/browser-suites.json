@@ -1,0 +1,11 @@
+{
+  "suites": [{
+    "id": "counter-public",
+    "cwd": "D:/Github/web-bench/common/temp/node_modules/.pnpm/@playwright+test@1.57.0/node_modules/playwright",
+    "command": ["node", "D:/Github/web-bench/projects/demo/node_modules/@playwright/test/cli.js", "test", "--config=D:/Github/CodingAgent/examples/tdd_counter/host/playwright.config.cjs", "--forbid-only"],
+    "test_files": ["D:/Github/CodingAgent/examples/tdd_counter/host/counter.spec.cjs", "D:/Github/CodingAgent/examples/tdd_counter/host/playwright.config.cjs"],
+    "expected_tests": ["counter cannot decrement below zero", "increment and decrement preserve positive values"],
+    "preview_command": ["python", "-m", "http.server", "8093", "--bind", "127.0.0.1"],
+    "preview_url": "http://127.0.0.1:8093/", "input_globs": ["*.js", "*.html"]
+  }]
+}

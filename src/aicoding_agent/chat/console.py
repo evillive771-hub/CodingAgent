@@ -45,6 +45,12 @@ class ChatEventSink:
                 )
         elif event_type == "tool.started":
             self.writer(f"  [tool] {data.get('tool_name', 'unknown')}")
+        elif event_type == "browser.verification_finished":
+            self.writer(
+                f"  [browser:{data.get('status', 'unknown')}] "
+                f"{data.get('verification_id', '?')}; "
+                f"passed={data.get('passed', 0)}; failed={data.get('failed', 0)}"
+            )
         elif event_type == "tool.finished":
             status = "ok" if data.get("ok") else "failed"
             output = str(data.get("output", "")).strip().splitlines()

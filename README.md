@@ -5,7 +5,7 @@
 当前版本已完成 Agent Kernel 和阶段一测试环境交付链路：
 
 - Python 异步 Agent Loop；
-- MiMo OpenAI-compatible 模型适配器；
+- MiMo / DeepSeek OpenAI-compatible 模型适配器；
 - Pydantic 工具 Schema、权限策略与执行预算；
 - 工作区内的读取、搜索、精确文本补丁和受控进程工具；
 - 工作区 Skill 目录发现和受合同约束的按需 `SKILL.md` 加载；
@@ -62,6 +62,9 @@ $env:UV_CACHE_DIR = "D:\\Github\\CodingAgent\\.uv-cache"
 安装项目依赖。
 
 模型配置从 `.env.local` 或显式的 `--env-file` 读取。不要提交真实密钥；仓库只保留 `.env.example`。
+将 `MODEL_PROVIDER_TEXT` 设置为 `mimo` 或 `deepseek` 即可选择供应商。DeepSeek 使用
+`DEEPSEEK_API_KEY`、可选的 `DEEPSEEK_BASE_URL`（默认 `https://api.deepseek.com`），模型名通过
+`MODEL_PROVIDER_TEXT_MODEL` 或 `DEEPSEEK_TEXT_MODEL` 配置。
 
 ## CLI
 
@@ -218,6 +221,14 @@ Agent 启动时只把名称、描述和 SHA-256 放入上下文；完整内容�
 [examples/chat_cases/README.md](examples/chat_cases/README.md)。
 
 详细设计见 [docs/architecture.md](docs/architecture.md)。
+
+前端连续任务可通过 `--regression-config` 启用宿主统一回归 Gate：完整命令测试和必需 Playwright
+都通过后才接受候选并更新实际代码基线，失败最多从基线重新尝试一次。`run`、`chat` 和
+`deliver-phase-one` 均支持，配置与证据位置见 [docs/regression-gate.md](docs/regression-gate.md)。
+
+任务合同可通过 `tdd.red_cases` 强制先确认需求测试在原始基线上失败，再启动编码和完整 GREEN
+验收；支持只读测试提案、持久化成对证据和多 Agent 组合验证，见
+[TDD 双重验证](docs/tdd-gate.md)。
 
 ## 开发与合并门槛
 

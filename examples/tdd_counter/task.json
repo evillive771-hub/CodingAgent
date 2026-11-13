@@ -1,0 +1,16 @@
+{
+  "task_id": "tdd-counter-clamp",
+  "objective": "修复 counter.js，使计数器减一不低于零，保留正数操作。按宿主确认的 RED 证据实现，运行命令和页面测试后提交。",
+  "acceptance_criteria": ["零值减一保持零", "正数加一和减一正确", "完整命令和浏览器测试通过"],
+  "allowed_tools": ["read_file", "list_files", "search_text", "apply_text_patch", "run_process", "run_playwright", "submit_result"],
+  "verification_commands": [{
+    "id": "counter-unit", "program": "python",
+    "args": ["-m", "pytest", "D:/Github/CodingAgent/examples/tdd_counter/host/test_counter_unit.py", "-c", "D:/Github/CodingAgent/examples/tdd_counter/host/pytest.ini", "--rootdir=D:/Github/CodingAgent/examples/tdd_counter/host"], "cwd": "."
+  }],
+  "browser_verifications": [{"id": "counter-e2e", "suite_ref": "counter-public", "required": true, "max_runs": 8, "timeout_seconds": 120}],
+  "tdd": {"red_cases": {
+    "counter-unit": ["test_counter_unit::test_zero_decrement"],
+    "counter-e2e": ["counter cannot decrement below zero"]
+  }},
+  "budget": {"max_turns": 20, "max_tool_calls": 60, "max_elapsed_seconds": 900}
+}

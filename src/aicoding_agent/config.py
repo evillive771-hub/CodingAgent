@@ -33,7 +33,7 @@ def read_env_file(path: Path) -> dict[str, str]:
 
 
 class ModelSettings(BaseModel):
-    provider: str = "mimo"
+    provider: Literal["mimo", "deepseek"] = "mimo"
     model: str
     api_key: SecretStr
     base_url: str
@@ -75,20 +75,27 @@ class ModelSettings(BaseModel):
     def from_env_file(cls, path: Path) -> ModelSettings:
         values = read_env_file(path)
         provider = values.get("MODEL_PROVIDER_TEXT", "mimo").strip().lower()
-        if provider != "mimo":
+        if provider not in {"mimo", "deepseek"}:
             raise ConfigurationError(
-                f"Unsupported MODEL_PROVIDER_TEXT={provider!r}; current adapter supports 'mimo'"
+                f"Unsupported MODEL_PROVIDER_TEXT={provider!r}; "
+                "supported providers are 'mimo' and 'deepseek'"
             )
 
-        model = values.get("MODEL_PROVIDER_TEXT_MODEL") or values.get("MIMO_TEXT_MODEL")
-        api_key = values.get("MIMO_API_KEY")
-        base_url = values.get("MIMO_BASE_URL")
+        provider_prefix = provider.upper()
+        model_variable = f"{provider_prefix}_TEXT_MODEL"
+        key_variable = f"{provider_prefix}_API_KEY"
+        base_url_variable = f"{provider_prefix}_BASE_URL"
+        model = values.get("MODEL_PROVIDER_TEXT_MODEL") or values.get(model_variable)
+        api_key = values.get(key_variable)
+        base_url = values.get(base_url_variable)
+        if provider == "deepseek" and not base_url:
+            base_url = "https://api.deepseek.com"
         missing = [
             name
             for name, value in {
-                "MODEL_PROVIDER_TEXT_MODEL or MIMO_TEXT_MODEL": model,
-                "MIMO_API_KEY": api_key,
-                "MIMO_BASE_URL": base_url,
+                f"MODEL_PROVIDER_TEXT_MODEL or {model_variable}": model,
+                key_variable: api_key,
+                base_url_variable: base_url,
             }.items()
             if not value
         ]

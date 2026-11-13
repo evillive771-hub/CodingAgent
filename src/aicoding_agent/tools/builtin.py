@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import stat
+import sys
 from pathlib import Path
 from uuid import uuid4
 
@@ -57,7 +58,7 @@ def _write_utf8_atomic(path: Path, content: str, *, create_only: bool = False) -
         temporary.unlink(missing_ok=True)
 
 
-def _safe_process_environment() -> dict[str, str]:
+def _safe_process_environment(*, verification_workspace: Path | None = None) -> dict[str, str]:
     allowed = {
         "COMSPEC",
         "HOMEDRIVE",
@@ -75,7 +76,17 @@ def _safe_process_environment() -> dict[str, str]:
         "USERPROFILE",
         "WINDIR",
     }
-    return {key: value for key, value in os.environ.items() if key.upper() in allowed}
+    environment = {key: value for key, value in os.environ.items() if key.upper() in allowed}
+    if verification_workspace is not None:
+        environment["REGRESSION_WORKSPACE"] = str(verification_workspace.resolve())
+        environment["EVAL_PROJECT_ROOT"] = str(verification_workspace.resolve())
+    return environment
+
+
+def _verification_executable(program: str, verification_id: str | None) -> str:
+    if verification_id and program.lower() in {"python", "python3", "python.exe", "python3.exe"}:
+        return sys.executable
+    return program
 
 
 class ReadFileInput(ToolInput):
@@ -346,6 +357,8 @@ class RunProcessTool(BaseTool[RunProcessInput]):
     async def run(self, arguments: RunProcessInput, context: ToolContext) -> ToolExecution:
         verification_id = _verification_id(arguments, context)
         context.begin_verification(verification_id)
+        if verification_id and context.shared_budget is not None:
+            await context.shared_budget.reserve_command(verification_id, charge_tool=False)
         cwd = resolve_workspace_path(
             context.workspace,
             arguments.cwd,
@@ -355,10 +368,12 @@ class RunProcessTool(BaseTool[RunProcessInput]):
             raise ToolError(f"Process cwd does not exist: {arguments.cwd}")
         try:
             process = await asyncio.create_subprocess_exec(
-                arguments.program,
+                _verification_executable(arguments.program, verification_id),
                 *arguments.args,
                 cwd=str(cwd),
-                env=_safe_process_environment(),
+                env=_safe_process_environment(
+                    verification_workspace=context.workspace if verification_id else None
+                ),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -416,6 +431,8 @@ class StartBackgroundProcessTool(BaseTool[StartBackgroundProcessInput]):
         self, arguments: StartBackgroundProcessInput, context: ToolContext
     ) -> ToolExecution:
         verification_id = _verification_id(arguments, context)
+        if verification_id and context.shared_budget is not None:
+            await context.shared_budget.reserve_command(verification_id, charge_tool=False)
         verification_sequence = context.begin_verification(verification_id)
         if context.background_manager is None:
             raise ToolError("This Agent run has no background task manager")
@@ -427,10 +444,12 @@ class StartBackgroundProcessTool(BaseTool[StartBackgroundProcessInput]):
         if not cwd.is_dir():
             raise ToolError(f"Process cwd does not exist: {arguments.cwd}")
         job = await context.background_manager.start(
-            program=arguments.program,
+            program=_verification_executable(arguments.program, verification_id),
             args=arguments.args,
             cwd=cwd,
-            env=_safe_process_environment(),
+            env=_safe_process_environment(
+                verification_workspace=context.workspace if verification_id else None
+            ),
             timeout_seconds=arguments.timeout_seconds,
             verification_id=verification_id,
         )
@@ -591,6 +610,8 @@ def build_builtin_registry() -> ToolRegistry:
         HistorySearchTool,
     )
     from aicoding_agent.tools.memory import ProposeMemoryTool, RecallMemoryTool
+    from aicoding_agent.tools.playwright import RunPlaywrightTool
+    from aicoding_agent.tools.tdd import SubmitTestProposalTool
     from aicoding_agent.tools.team import ProposeTeamTool
 
     registry = ToolRegistry()
@@ -600,6 +621,7 @@ def build_builtin_registry() -> ToolRegistry:
         SearchTextTool(),
         LoadSkillTool(),
         GetDiagnosticsTool(),
+        RunPlaywrightTool(),
         ApplyTextPatchTool(),
         CreateFileTool(),
         RunProcessTool(),
@@ -617,6 +639,7 @@ def build_builtin_registry() -> ToolRegistry:
         HistoryReadItemTool(),
         HistoryListItemsTool(),
         ProposeTeamTool(),
+        SubmitTestProposalTool(),
     ):
         registry.register(tool)
     return registry

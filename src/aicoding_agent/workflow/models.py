@@ -15,6 +15,7 @@ class DeliveryStage(StrEnum):
     CREATED = "created"
     PREPARING_WORKSPACE = "preparing_workspace"
     CODING = "coding"
+    REGRESSION_VERIFYING = "regression_verifying"
     INSPECTING_CHANGES = "inspecting_changes"
     BUILDING = "building"
     TEST_DEPLOYING = "test_deploying"
@@ -23,6 +24,7 @@ class DeliveryStage(StrEnum):
     FINALIZING = "finalizing"
     COMPLETED = "completed"
     FAILED = "failed"
+    BLOCKED = "blocked"
     ROLLING_BACK = "rolling_back"
     ROLLED_BACK = "rolled_back"
 
@@ -46,6 +48,8 @@ class WorkflowRun(WorkflowModel):
     stage: DeliveryStage = DeliveryStage.CREATED
     contract: dict[str, Any]
     agent_result: dict[str, Any] | None = None
+    regression_outcome: dict[str, Any] | None = None
+    regression_report: dict[str, Any] | None = None
     change_snapshot: dict[str, Any] | None = None
     build_receipt: dict[str, Any] | None = None
     deployment_receipt: dict[str, Any] | None = None

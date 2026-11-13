@@ -42,3 +42,20 @@ def test_optional_context_and_resume_settings_are_loaded(tmp_path: Path) -> None
     assert settings.summary_max_output_tokens == 6_000
     assert settings.auto_compact is False
     assert settings.auto_resume == "ask"
+
+
+def test_deepseek_provider_uses_provider_specific_key_and_default_url(tmp_path: Path) -> None:
+    path = tmp_path / "deepseek.env"
+    path.write_text(
+        "MODEL_PROVIDER_TEXT=deepseek\n"
+        "DEEPSEEK_TEXT_MODEL=deepseek-flash\n"
+        "DEEPSEEK_API_KEY=deepseek-secret\n",
+        encoding="utf-8",
+    )
+
+    settings = ModelSettings.from_env_file(path)
+
+    assert settings.provider == "deepseek"
+    assert settings.model == "deepseek-flash"
+    assert settings.base_url == "https://api.deepseek.com"
+    assert "deepseek-secret" not in repr(settings)

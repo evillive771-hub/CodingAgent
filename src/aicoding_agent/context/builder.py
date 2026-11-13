@@ -24,6 +24,10 @@ Rules:
   transitions against the exact wording of each acceptance criterion.
 - Do not modify tests merely to hide a product defect.
 - After every code mutation, rerun every required verification command.
+- When browser_verifications are configured, use run_playwright with their verification_id.
+  Fix assertion failures using the returned structured feedback, then rerun required suites.
+  Tool ok=true means execution completed; only data.status=passed is successful verification.
+  Do not change fixed tests or treat an environment failure as a product assertion failure.
 - Read back the final changed code before submission. If verification commands are unavailable,
   perform a static review and explicitly disclose that runtime behavior remains untested.
 - Before finishing, call submit_result with a factual summary, changed files, and remaining risks.

@@ -100,6 +100,17 @@ class DiagnosticParser(StrEnum):
     GENERIC = "generic"
 
 
+class BrowserVerificationContract(StrictModel):
+    """A public browser suite selected from host-owned, frozen configuration."""
+
+    id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_.-]+$")
+    required: bool = True
+    suite_ref: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.-]+$")
+    timeout_seconds: float = Field(default=120, gt=0, le=1800)
+    max_runs: int = Field(default=6, ge=1, le=100)
+    max_failures_returned: int = Field(default=10, ge=1, le=50)
+
+
 class DiagnosticCommand(VerificationCommand):
     parser: DiagnosticParser = DiagnosticParser.GENERIC
     timeout_seconds: float = Field(default=120, gt=0, le=1800)
@@ -130,6 +141,22 @@ class BuildCommand(VerificationCommand):
 class ReleasePolicy(StrictModel):
     auto_deploy_test: bool = True
     production_requires_separate_approval: Literal[True] = True
+
+
+class TddSpec(StrictModel):
+    red_cases: dict[str, list[str]] = Field(default_factory=dict, max_length=100)
+    propose_tests: bool = False
+
+    @model_validator(mode="after")
+    def declared_cases_must_be_unique(self) -> TddSpec:
+        if not self.red_cases and not self.propose_tests:
+            raise ValueError("TDD requires target cases or a test proposal stage")
+        for suite_id, cases in self.red_cases.items():
+            if (not suite_id or len(suite_id) > 64 or not cases or len(cases) > 500
+                    or len(cases) != len(set(cases))
+                    or any(not case.strip() or len(case) > 500 for case in cases)):
+                raise ValueError("TDD target case IDs must be nonempty, unique and bounded")
+        return self
 
 
 class TaskContract(StrictModel):
@@ -166,6 +193,8 @@ class TaskContract(StrictModel):
     )
     allowed_path_prefixes: list[str] = Field(default_factory=lambda: ["."])
     verification_commands: list[VerificationCommand] = Field(default_factory=list)
+    browser_verifications: list[BrowserVerificationContract] = Field(default_factory=list)
+    tdd: TddSpec | None = None
     build_commands: list[BuildCommand] = Field(default_factory=list)
     artifact_paths: list[str] = Field(default_factory=list, max_length=100)
     diagnostic_commands: list[DiagnosticCommand] = Field(default_factory=list)
@@ -217,6 +246,10 @@ class TaskContract(StrictModel):
 
     @model_validator(mode="after")
     def teambition_requires_ticket_id(self) -> TaskContract:
+        verification_ids = [item.id for item in self.verification_commands]
+        verification_ids.extend(item.id for item in self.browser_verifications)
+        if len(verification_ids) != len(set(verification_ids)):
+            raise ValueError("verification IDs must be unique across command and browser suites")
         if self.source == TaskSource.TEAMBITION and not self.source_ticket_id:
             raise ValueError("Teambition tasks require source_ticket_id")
         if self.requires_plan_approval and not (self.execution_plan or "").strip():
@@ -231,6 +264,8 @@ def canonical_task_contract_payload(
         contract if isinstance(contract, TaskContract) else TaskContract.model_validate(contract)
     )
     payload = validated.model_dump(mode="json")
+    if payload.get("tdd") is None:
+        payload.pop("tdd", None)
     payload["allowed_tools"] = sorted(validated.allowed_tools)
     payload["allowed_commands"] = sorted(validated.allowed_commands)
     return payload
@@ -268,6 +303,7 @@ class CodingOutcome(StrictModel):
 
 class AgentStatus(StrEnum):
     COMPLETED = "completed"
+    BLOCKED = "blocked"
     SUBMITTED_UNVERIFIED = "submitted_unverified"
     WAITING_FOR_USER = "waiting_for_user"
     INTERRUPTED = "interrupted"

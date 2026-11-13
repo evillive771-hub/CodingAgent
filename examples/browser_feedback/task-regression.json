@@ -1,0 +1,17 @@
+{
+  "task_id": "regression-counter-clamp",
+  "objective": "修复 counter.js：减一不能让计数器小于 0，同时保留正常加一和减一行为。通过命令测试和固定 Playwright 页面测试后提交。",
+  "acceptance_criteria": ["计数为 0 时减一仍为 0", "正数计数加一和减一正常", "命令测试和页面测试都通过"],
+  "allowed_tools": ["read_file", "list_files", "search_text", "apply_text_patch", "run_process", "run_playwright", "submit_result"],
+  "verification_commands": [{
+    "id": "counter-unit",
+    "program": "node",
+    "args": ["-e", "const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict'); const context={document:{querySelector:()=>({value:'0',addEventListener(){}})}}; vm.runInNewContext(fs.readFileSync('counter.js','utf8'),context); assert.equal(context.decrement(0),0); assert.equal(context.increment(3),4); assert.equal(context.decrement(3),2);"],
+    "cwd": "."
+  }],
+  "browser_verifications": [{
+    "id": "counter-e2e", "suite_ref": "counter-public", "required": true,
+    "timeout_seconds": 120, "max_runs": 8, "max_failures_returned": 5
+  }],
+  "budget": {"max_turns": 20, "max_tool_calls": 60, "max_elapsed_seconds": 900}
+}

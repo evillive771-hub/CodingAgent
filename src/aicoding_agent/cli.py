@@ -13,6 +13,7 @@ import typer
 from prompt_toolkit import PromptSession
 from prompt_toolkit.patch_stdout import patch_stdout
 
+from aicoding_agent.adapters.browser_tests import BrowserTestRunner
 from aicoding_agent.adapters.build import ControlledArtifactBuilder
 from aicoding_agent.adapters.deployment import DeploymentError, SftpNfsTestEnvironmentPublisher
 from aicoding_agent.adapters.git import GitChangeInspector, LocalGitWorktreeManager
@@ -58,8 +59,9 @@ from aicoding_agent.context.session_memory import (
 )
 from aicoding_agent.delivery_config import DeliveryConfigurationError, PhaseOneDeliveryConfig
 from aicoding_agent.domain.models import TaskContract
-from aicoding_agent.model.mimo import MimoChatModel
+from aicoding_agent.model import create_chat_model
 from aicoding_agent.persistence.jsonl import AtomicCheckpointStore, JsonlEventSink
+from aicoding_agent.regression.config import build_controller
 from aicoding_agent.tools.base import ToolError
 from aicoding_agent.tools.builtin import build_builtin_registry
 from aicoding_agent.tools.executor import ToolExecutor
@@ -117,6 +119,7 @@ def validate_task(
                 "task_id": contract.task_id,
                 "source": contract.source,
                 "verification_ids": [item.id for item in contract.verification_commands],
+                "browser_verification_ids": [item.id for item in contract.browser_verifications],
             },
             ensure_ascii=False,
             indent=2,
@@ -135,7 +138,7 @@ def doctor(
         typer.Option(help="Make a small multi-turn Tool Calling request using the configured API."),
     ] = False,
 ) -> None:
-    """Validate local configuration; optionally run a live MiMo protocol probe."""
+    """Validate local configuration; optionally probe the configured model provider."""
     try:
         settings = ModelSettings.from_env_file(env_file)
     except ConfigurationError as exc:
@@ -151,7 +154,7 @@ def doctor(
 
 
 async def _live_protocol_probe(settings: ModelSettings) -> None:
-    model = MimoChatModel(settings.model_copy(update={"max_output_tokens": 512}))
+    model = create_chat_model(settings.model_copy(update={"max_output_tokens": 512}))
     tools = [
         {
             "type": "function",
@@ -211,6 +214,20 @@ def run_agent(
         Path,
         typer.Option(exists=True, dir_okay=False, readable=True, help="Model environment file."),
     ] = Path("env.txt"),
+    browser_suites: Annotated[
+        Path | None,
+        typer.Option(
+            exists=True, dir_okay=False, readable=True, help="Trusted host browser suites JSON."
+        ),
+    ] = None,
+    runtime_dir: Annotated[
+        Path | None,
+        typer.Option(help="Runtime evidence and logs; browser evidence must be external."),
+    ] = None,
+    regression_config: Annotated[
+        Path | None,
+        typer.Option(exists=True, dir_okay=False, readable=True, help="Host regression gate JSON."),
+    ] = None,
 ) -> None:
     """Run the Coding Agent in a real workspace under a validated task contract."""
     contract = _load_contract(task)
@@ -218,7 +235,19 @@ def run_agent(
         settings = ModelSettings.from_env_file(env_file)
     except ConfigurationError as exc:
         raise typer.BadParameter(str(exc), param_hint="--env-file") from exc
-    result = asyncio.run(_run_agent(contract, workspace, settings))
+    try:
+        result = asyncio.run(
+            _run_agent(
+                contract,
+                workspace,
+                settings,
+                browser_suites=browser_suites,
+                runtime_root=runtime_dir,
+                regression_config=regression_config,
+            )
+        )
+    except (ValueError, OSError, RuntimeError) as exc:
+        raise typer.BadParameter(str(exc), param_hint="--browser-suites") from exc
     typer.echo(result.model_dump_json(indent=2))
     if result.status != "completed":
         raise typer.Exit(code=1)
@@ -232,14 +261,28 @@ async def _run_agent(
     run_id: str | None = None,
     runtime_root: Path | None = None,
     progress_writer: Callable[[str], None] | None = None,
+    browser_suites: Path | None = None,
+    regression_config: Path | None = None,
+    shared_budget: Any = None,
+    proposal_only: bool = False,
+    tdd_authorized: bool = False,
 ):
-    model = MimoChatModel(settings)
-    evaluator_model = MimoChatModel(settings.model_copy(update={"max_output_tokens": 2048}))
-    subagent_model = MimoChatModel(settings)
-    summary_model = MimoChatModel(
+    runtime_root = runtime_root or (
+        workspace.resolve().parent / ".aicoding-agent-runtime" / workspace.name
+        if browser_suites is not None or regression_config is not None
+        else workspace / ".aicoding-agent"
+    )
+    browser_runner = (
+        await BrowserTestRunner.from_config(browser_suites, runtime_root / "evidence" / "browser")
+        if browser_suites is not None
+        else None
+    )
+    model = create_chat_model(settings)
+    evaluator_model = create_chat_model(settings.model_copy(update={"max_output_tokens": 2048}))
+    subagent_model = create_chat_model(settings)
+    summary_model = create_chat_model(
         settings.model_copy(update={"max_output_tokens": settings.summary_max_output_tokens})
     )
-    runtime_root = runtime_root or workspace / ".aicoding-agent"
     workspace_key = hashlib.sha256(str(workspace.resolve()).casefold().encode()).hexdigest()[:16]
     persistent_events = JsonlEventSink(runtime_root / "runs")
     event_sink = (
@@ -285,9 +328,23 @@ async def _run_agent(
         subagent_manager=subagent_manager,
         memory_manager=memory_manager,
         team_launch_manager=team_launch_manager,
+        browser_runner=browser_runner,
     )
     try:
-        return await agent.run(contract, workspace, run_id=run_id)
+        if proposal_only:
+            return await agent.propose_tests(
+                contract, workspace, run_id=run_id, shared_budget=shared_budget
+            )
+        if regression_config is not None:
+            controller = await build_controller(
+                regression_config, runtime_root, browser_runner=browser_runner
+            )
+            outcome = await controller.run(
+                contract, workspace, run_id=run_id or uuid4().hex, agent=agent, adopt=True
+            )
+            return outcome.agent_result
+        return await agent.run(contract, workspace, run_id=run_id, shared_budget=shared_budget,
+                               tdd_authorized=tdd_authorized)
     finally:
         await model.aclose()
         await evaluator_model.aclose()
@@ -302,10 +359,27 @@ class _ConfiguredCodingAgent:
         runtime_root: Path,
         *,
         progress_writer: Callable[[str], None] | None = None,
+        browser_suites: Path | None = None,
     ) -> None:
         self.settings = settings
         self.runtime_root = runtime_root
         self.progress_writer = progress_writer
+        self.browser_suites = browser_suites
+
+    async def propose_tests(
+        self,
+        contract: TaskContract,
+        workspace: Path,
+        *,
+        run_id: str | None = None,
+        shared_budget: Any = None,
+    ):
+        return await _run_agent(
+            contract, workspace, self.settings, run_id=run_id,
+            runtime_root=self.runtime_root, progress_writer=self.progress_writer,
+            browser_suites=self.browser_suites, shared_budget=shared_budget,
+            proposal_only=True,
+        )
 
     async def run(
         self,
@@ -313,6 +387,8 @@ class _ConfiguredCodingAgent:
         workspace: Path,
         *,
         run_id: str | None = None,
+        shared_budget: Any = None,
+        tdd_authorized: bool = False,
     ):
         return await _run_agent(
             contract,
@@ -321,6 +397,9 @@ class _ConfiguredCodingAgent:
             run_id=run_id,
             runtime_root=self.runtime_root,
             progress_writer=self.progress_writer,
+            browser_suites=self.browser_suites,
+            shared_budget=shared_budget,
+            tdd_authorized=tdd_authorized,
         )
 
 
@@ -337,6 +416,16 @@ def deliver_phase_one(
     resume: Annotated[
         bool, typer.Option(help="Resume an existing run; requires --run-id.")
     ] = False,
+    regression_config: Annotated[
+        Path | None,
+        typer.Option(exists=True, dir_okay=False, readable=True, help="Host regression gate JSON."),
+    ] = None,
+    browser_suites: Annotated[
+        Path | None,
+        typer.Option(
+            exists=True, dir_okay=False, readable=True, help="Trusted host browser suites JSON."
+        ),
+    ] = None,
 ) -> None:
     """Run build, test deployment, Playwright evidence, and human approval without Git/TB writes."""
     contract = _load_contract(task)
@@ -382,6 +471,8 @@ def deliver_phase_one(
                 delivery_settings,
                 run_id=run_id,
                 resume=resume,
+                browser_suites=browser_suites,
+                regression_config=regression_config,
             )
         )
     except (ToolError, WorkflowError) as exc:
@@ -400,6 +491,8 @@ async def _deliver_phase_one_interactive(
     *,
     run_id: str | None,
     resume: bool,
+    browser_suites: Path | None = None,
+    regression_config: Path | None = None,
 ):
     runtime = delivery_settings.runtime_root
     runtime.mkdir(parents=True, exist_ok=True)
@@ -408,11 +501,24 @@ async def _deliver_phase_one_interactive(
         delivery_settings.deployment,
         runtime / "evidence" / "deployment",
     )
+    regression_browser_runner = (
+        await BrowserTestRunner.from_config(
+            browser_suites, runtime / "evidence" / "regression-browser"
+        )
+        if browser_suites is not None
+        else None
+    )
+    regression_controller = (
+        await build_controller(regression_config, runtime, browser_runner=regression_browser_runner)
+        if regression_config is not None
+        else None
+    )
     workflow = DeliveryWorkflow(
         agent=_ConfiguredCodingAgent(
             model_settings,
             runtime / "agent",
             progress_writer=typer.echo,
+            browser_suites=browser_suites,
         ),
         workspace_manager=LocalGitWorktreeManager(runtime / "worktrees"),
         change_inspector=GitChangeInspector(),
@@ -428,12 +534,9 @@ async def _deliver_phase_one_interactive(
             writer=typer.echo,
         ),
         finalize_external_changes=False,
+        regression_controller=regression_controller,
     )
-    device_lock_target = (
-        runtime
-        / "device-leases"
-        / f"{publisher.device_id}.lock"
-    )
+    device_lock_target = runtime / "device-leases" / f"{publisher.device_id}.lock"
     device_locks = WorkspaceFileLockManager(timeout_seconds=10)
     async with device_locks.acquire(
         runtime,
@@ -562,6 +665,16 @@ def chat_agent(
             )
         ),
     ] = None,
+    browser_suites: Annotated[
+        Path | None,
+        typer.Option(
+            exists=True, dir_okay=False, readable=True, help="Trusted host browser suites JSON."
+        ),
+    ] = None,
+    regression_config: Annotated[
+        Path | None,
+        typer.Option(exists=True, dir_okay=False, readable=True, help="Host regression gate JSON."),
+    ] = None,
 ) -> None:
     """Start a persistent Claude Code-style conversational coding session."""
     _configure_console_output()
@@ -573,7 +686,12 @@ def chat_agent(
             param_hint="--profile",
         )
     contract = _load_contract(selected_profile)
-    selected_runtime = (runtime_dir or (resolved_workspace / ".aicoding-agent")).resolve()
+    default_runtime = (
+        resolved_workspace.parent / ".aicoding-agent-runtime" / resolved_workspace.name
+        if browser_suites is not None or regression_config is not None
+        else resolved_workspace / ".aicoding-agent"
+    )
+    selected_runtime = (runtime_dir or default_runtime).resolve()
     if selected_runtime.is_relative_to(resolved_workspace):
         relative_runtime = selected_runtime.relative_to(resolved_workspace)
         if not relative_runtime.parts or relative_runtime.parts[0] != ".aicoding-agent":
@@ -593,6 +711,8 @@ def chat_agent(
                 settings=settings,
                 session_id=session_id,
                 runtime_dir=selected_runtime,
+                browser_suites=browser_suites,
+                regression_config=regression_config,
             )
         )
     except (ValueError, ChatStoreError) as exc:
@@ -614,9 +734,16 @@ async def _chat_loop(
     settings: ModelSettings,
     session_id: str,
     runtime_dir: Path,
+    browser_suites: Path | None = None,
+    regression_config: Path | None = None,
 ) -> None:
     workspace_key = hashlib.sha256(str(workspace).casefold().encode()).hexdigest()[:16]
     runtime_root = runtime_dir / "chat" / workspace_key
+    browser_runner = (
+        await BrowserTestRunner.from_config(browser_suites, runtime_root / "evidence" / "browser")
+        if browser_suites is not None
+        else None
+    )
     persistent_events = JsonlEventSink(runtime_root / "events")
     telemetry = TelemetryRegistry()
     event_sink = ChatEventSink(
@@ -624,10 +751,10 @@ async def _chat_loop(
         writer=typer.echo,
         telemetry=telemetry,
     )
-    model = MimoChatModel(settings)
-    evaluator_model = MimoChatModel(settings.model_copy(update={"max_output_tokens": 2048}))
-    subagent_model = MimoChatModel(settings)
-    summary_model = MimoChatModel(
+    model = create_chat_model(settings)
+    evaluator_model = create_chat_model(settings.model_copy(update={"max_output_tokens": 2048}))
+    subagent_model = create_chat_model(settings)
+    summary_model = create_chat_model(
         settings.model_copy(update={"max_output_tokens": settings.summary_max_output_tokens})
     )
     hook_bus = AsyncHookBus()
@@ -687,6 +814,12 @@ async def _chat_loop(
         subagent_manager=subagent_manager,
         memory_manager=memory_manager,
         team_launch_manager=team_launch_manager,
+        browser_runner=browser_runner,
+    )
+    regression_controller = (
+        await build_controller(regression_config, runtime_root, browser_runner=browser_runner)
+        if regression_config is not None
+        else None
     )
     session = ChatSession(
         agent=agent,
@@ -705,6 +838,7 @@ async def _chat_loop(
         team_launch_manager=team_launch_manager,
         team_plan_approval_manager=team_plan_approval_manager,
         team_message_bus=team_message_bus,
+        regression_controller=regression_controller,
     )
     try:
         await session.initialize()

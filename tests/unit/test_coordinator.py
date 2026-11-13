@@ -16,6 +16,53 @@ from aicoding_agent.domain.models import (
     CodingOutcome,
     TaskContract,
 )
+from aicoding_agent.regression.budget import RegressionBudget, RegressionBudgetExceeded
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("supports_budget", [False, True])
+async def test_worker_coding_and_host_regression_share_persistent_budget(tmp_path, supports_budget):
+    contract = TaskContract(task_id="budget", objective="Fix", acceptance_criteria=["Pass"])
+    budget = await RegressionBudget.initialize(tmp_path / "budget", "assignment", contract.budget)
+
+    class LegacyAgent:
+        async def run(self, contract, workspace, *, run_id):
+            return AgentResult(
+                status=AgentStatus.COMPLETED, run_id=run_id, turns=1, tool_calls=2
+            )
+
+    class BudgetAgent:
+        async def run(self, contract, workspace, *, run_id, shared_budget):
+            assert shared_budget is budget
+            await shared_budget.charge_turn()
+            await shared_budget.charge_tools(2)
+            return AgentResult(
+                status=AgentStatus.COMPLETED, run_id=run_id, turns=1, tool_calls=2
+            )
+
+    runtime = CoordinatorWorkerRuntime(
+        "worker", BudgetAgent() if supports_budget else LegacyAgent()
+    )
+    await runtime.run_assignment(contract, tmp_path, run_id="assignment", shared_budget=budget)
+    await budget.reserve_command("host-regression")
+    restored = await RegressionBudget.initialize(tmp_path / "budget", "assignment", contract.budget)
+    state = await restored.refresh()
+    assert state.turns == 1
+    assert state.tool_calls == 3
+    assert state.command_runs == {"host-regression": 1}
+
+
+@pytest.mark.asyncio
+async def test_host_verification_cannot_reset_exhausted_worker_budget(tmp_path):
+    contract = TaskContract(task_id="limited", objective="Fix", acceptance_criteria=["Pass"])
+    limits = contract.budget.model_copy(update={"max_tool_calls": 2})
+    budget = await RegressionBudget.initialize(tmp_path / "budget", "limited", limits)
+    await budget.charge_tools(2)
+    resumed = await RegressionBudget.initialize(tmp_path / "budget", "limited", limits)
+    with pytest.raises(RegressionBudgetExceeded):
+        await resumed.reserve_command("host-regression")
+    assert (await resumed.refresh()).tool_calls == 2
+    assert (await resumed.refresh()).command_runs == {}
 
 
 class StaticInspector:
@@ -75,6 +122,23 @@ async def test_worker_runtime_reuses_agent_and_carries_bounded_assignment_histor
     ]
     assert runtime.state.assignments_completed == 2
     assert runtime.state.lifecycle == WorkerLifecycle.IDLE
+
+
+@pytest.mark.asyncio
+async def test_worker_receives_host_red_case_feedback_before_coding(tmp_path):
+    agent = HistoryAwareAgent()
+    runtime = CoordinatorWorkerRuntime("worker", agent)
+    contract = TaskContract(task_id="tdd", objective="Fix clamp", acceptance_criteria=["Pass"])
+    await runtime.run_assignment(
+        contract, tmp_path, run_id="tdd", tdd_evidence={
+            "red_cases": {"counter": ["test_zero_clamp"]},
+            "red_report": {"tests": [{"id": "counter", "reason": "Expected 0, received -1"}]},
+        },
+    )
+    history = agent.received_history[0]
+    assert "test_zero_clamp" in history[-1]["content"]
+    assert "Expected 0, received -1" in history[-1]["content"]
+    assert "GREEN" in history[-1]["content"]
 
 
 @pytest.mark.asyncio

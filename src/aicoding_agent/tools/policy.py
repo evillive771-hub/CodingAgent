@@ -53,6 +53,8 @@ class PolicyEngine:
             )
 
         argument_data = arguments.model_dump()
+        if tool.name == "submit_test_proposal":
+            return PolicyDecision(behavior=PolicyBehavior.ALLOW)
         raw_path = argument_data.get("path")
         if isinstance(raw_path, str):
             try:
@@ -120,6 +122,20 @@ class PolicyEngine:
                     workspace,
                     command.cwd,
                     allowed_prefixes=contract.allowed_path_prefixes,
+                )
+            except ToolError as exc:
+                return PolicyDecision(behavior=PolicyBehavior.DENY, reason=str(exc))
+
+        if tool.name == "run_playwright":
+            verification_id = argument_data.get("verification_id")
+            if not any(item.id == verification_id for item in contract.browser_verifications):
+                return PolicyDecision(
+                    behavior=PolicyBehavior.DENY,
+                    reason=f"Unknown task-contract browser verification ID: {verification_id}",
+                )
+            try:
+                resolve_workspace_path(
+                    workspace, ".", allowed_prefixes=contract.allowed_path_prefixes
                 )
             except ToolError as exc:
                 return PolicyDecision(behavior=PolicyBehavior.DENY, reason=str(exc))

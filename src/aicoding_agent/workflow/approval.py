@@ -26,7 +26,9 @@ class ApprovalPackage(WorkflowModel):
 class ApprovalPackageBuilder:
     """Build a stable, human-inspectable approval subject from completed test evidence."""
 
-    def build(self, run: WorkflowRun) -> ApprovalPackage:
+    def build(
+        self, run: WorkflowRun, *, tdd_evidence: dict[str, Any] | None = None,
+    ) -> ApprovalPackage:
         contract = self._required_mapping("contract", run.contract)
         agent_result = self._required_mapping("agent_result", run.agent_result)
         change_snapshot = self._required_mapping("change_snapshot", run.change_snapshot)
@@ -86,6 +88,26 @@ class ApprovalPackageBuilder:
             "deployment_receipt": deployment,
             "verification_report": verification,
         }
+        if run.regression_report is not None:
+            if (run.regression_outcome or {}).get("status") != "accepted":
+                raise ApprovalPackageError("Approval package requires accepted regression evidence")
+            subject["regression_report"] = self._canonical_copy(run.regression_report)
+            subject["accepted_baseline_revision"] = (run.regression_outcome or {}).get(
+                "baseline_revision"
+            )
+        proof = tdd_evidence or (run.regression_outcome or {}).get("tdd_evidence")
+        if contract.get("tdd") is not None and proof is None:
+            raise ApprovalPackageError("Approval package requires TDD RED/GREEN evidence")
+        if proof is not None:
+            if (not isinstance(proof, dict)
+                    or (run.regression_outcome or {}).get("status") != "accepted"
+                    or (run.regression_report or {}).get("status") != "passed"
+                    or proof.get("red_report", {}).get("status") != "assertion_failed"):
+                raise ApprovalPackageError(
+                    "Approval package requires accepted TDD RED/GREEN evidence"
+                )
+            subject["tdd_evidence"] = self._canonical_copy(proof)
+            subject["tdd_evidence_hash"] = self._hash(subject["tdd_evidence"])
         canonical_subject = self._canonical_copy(subject)
         return ApprovalPackage(
             subject_hash=self._hash(canonical_subject),

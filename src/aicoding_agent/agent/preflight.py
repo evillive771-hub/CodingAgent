@@ -55,6 +55,11 @@ def _inspect_runtime(
         "workspace_root_node_modules": _path_present(workspace / "node_modules", directory=True),
         "process_tools": sorted(tools & {"run_process", "start_background_process"}),
         "verification_command_count": len(contract.verification_commands),
+        "browser_verifications": [
+            {"id": item.id, "required": item.required, "suite_ref": item.suite_ref}
+            for item in contract.browser_verifications[:32]
+        ],
+        "browser_tool_available": "run_playwright" in tools,
         "verification_preflight": commands,
         "verification_preflight_truncated": len(contract.verification_commands) > len(commands),
     }
@@ -76,7 +81,9 @@ def render_runtime(facts: dict[str, Any]) -> str:
         "filesystem observation; nested/workspace dependencies may still exist. Null means "
         "inspection was unavailable. Process tools permit only exact contract verification "
         "commands and approved read-only Git commands. The get_diagnostics tool separately "
-        "permits configured diagnostic_commands. An empty "
+        "permits configured diagnostic_commands. "
+        "run_playwright executes only configured fixed public browser suites; assertion "
+        "failures are feedback for further coding, not successful verification. An empty "
         "blocker list does not prove a command or its dependencies will work; run it to verify. "
         "If no verification is configured, report changes as unverified. Do not invent test "
         "success or repeatedly try commands blocked by policy.\n"

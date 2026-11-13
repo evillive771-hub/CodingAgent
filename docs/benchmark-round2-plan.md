@@ -1,8 +1,12 @@
 # CodingAgent 第二轮实验方案
 
-版本：v1.2  
-日期：2026-09-16  
-状态：真实服务器小型闭环已通过；benchmark runner 前置修复未完成；宿主内存门禁未通过；尚未开始正式实验
+版本：v1.4  
+日期：2026-09-23  
+状态：时延采集与报告已就绪；新一轮实验因资源门禁未通过而尚未创建 root
+
+阶段 3 共 11 个可计分哨兵任务，外部验证通过 8 个。复盘确认 Canvas 的后续任务会丢失此前公开需求，ReactBench 工作区缺少可执行验证上下文和针对 React 审查任务的按需指南。v1.3 已完成以下修正：Web-Bench 合同携带当前任务之前的公开验收要求；恢复执行增加绝对任务边界；Agent 启动与恢复时记录本地运行能力；ReactBench 适配器隔离接入 `react-review` skill；报告将 `submitted_unverified` 与错误失败声明分开统计；SUT 指纹统一覆盖 `src/` 与 `skills/`。这些修改改变了 SUT 指纹，下一轮必须新建实验 root 并重新校准，不得续用 `round2-20260917-100654` 的校准结果。
+
+v1.4 为每个 task 增加模型调用、工具调用和目标评估操作时延的 P50/P90/P95，结果进入 `summary.json`、离线 HTML、`task-results.csv` 与独立的 `task-latency.csv`。2026-09-23 启动检查发现 C 盘仅约 0.06 GiB 可用、D 盘约 41.04 GiB 可用、宿主可用内存约 1.47–2.31 GiB，Docker daemon 未运行，因此没有创建正式实验 root。必须先恢复 C ≥ 10 GiB、D ≥ 50 GiB、Docker 启动前宿主可用内存 ≥ 6 GiB，再验证固定镜像和 Docker VM 内存。
 
 v1.2 根据 2026-09-16 的代码、工具和资源复核更新：CodingAgent 当前全量测试为 243 项通过，benchmark tools 仍为 19 项通过；D 盘可用约 62.52 GiB，C 盘可用约 26.39 GiB，Docker daemon 当前停止，宿主可用内存约 0.97 GiB。外部 runner、校准门禁与报告器仍未接入 `submitted_unverified` 和新鲜验证证据语义，正式第二轮实验未创建 root、未产生计分结果。
 
@@ -216,6 +220,7 @@ Docker 门禁必须验证 daemon、Compose 和容器探针；在容器内对实�
 - **完成召回率**：隐藏验证通过且为 `completed` 的任务数 / 隐藏验证通过任务数；
 - **未验证路由正确率**：缺少新鲜公开验证证据的 mutation 中，正确进入 `submitted_unverified` 的比例；
 - **无证据完成违规数**：缺少新鲜确定性验证证据却进入 `completed` 的数量；
+- **每任务操作时延**：从该 task 的审计事件分别提取 `model.response`、`tool.finished` 和 `goal.evaluated` 的 `duration_ms`，按类别记录样本数及 P50/P90/P95。分位数使用零基位置 `(n - 1) × p` 线性插值；这些数值描述单次 task 内部操作时延，不冒充需要多次独立运行才能得到的端到端 task 时延分布。
 - **新鲜证据覆盖率**：`completed` 中验证发生在最后一次 mutation 之后的比例。
 
 Web-Bench 还需分别报告当前任务通过率、既有任务无回归率、累计通过率、首次回归位置和最长绿色前缀。运行层报告预算耗尽率、最后三轮提醒覆盖率、工具错误率、归档压缩次数、语义压缩次数、恢复次数、耗时和 token 分位数。

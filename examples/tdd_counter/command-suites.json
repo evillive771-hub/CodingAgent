@@ -1,0 +1,8 @@
+{
+  "suites": [{
+    "id": "counter-unit", "cwd": "host",
+    "command": ["D:/Github/CodingAgent/.venv/Scripts/python.exe", "-m", "pytest", "test_counter_unit.py", "-c", "pytest.ini"],
+    "test_files": ["test_counter_unit.py", "pytest.ini"], "reporter": "pytest_junit",
+    "expected_tests": ["test_counter_unit::test_zero_decrement", "test_counter_unit::test_positive_operations"]
+  }]
+}

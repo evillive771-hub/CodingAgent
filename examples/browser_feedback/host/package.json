@@ -1,0 +1,6 @@
+{
+  "name": "codingagent-browser-feedback-public-suite",
+  "private": true,
+  "version": "1.0.0",
+  "devDependencies": { "@playwright/test": "1.57.0" }
+}

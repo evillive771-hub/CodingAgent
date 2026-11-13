@@ -24,6 +24,35 @@ class GateDecision(BaseModel):
 
 
 class CompletionGate:
+    async def refresh_browser_evidence(self, context: ToolContext) -> None:
+        """Recheck host evidence; resumed messages cannot restore verification success."""
+        from aicoding_agent.adapters.browser_tests import BrowserTestResult
+
+        successes = context.state.get("verification_success", {})
+        for verification in context.contract.browser_verifications:
+            if verification.id not in successes:
+                continue
+            raw = context.state.get("browser_verification_results", {}).get(verification.id)
+            valid = False
+            if context.browser_runner is not None and raw is not None:
+                try:
+                    result = BrowserTestResult.model_validate(raw)
+                    valid = result.status == "passed" and await context.browser_runner.revalidate(
+                        context.workspace, result
+                    )
+                except (ValueError, OSError, RuntimeError):
+                    valid = False
+            if not valid:
+                successes.pop(verification.id, None)
+                if context.emit is not None:
+                    await context.emit(
+                        "browser.verification_invalidated",
+                        {
+                            "verification_id": verification.id,
+                            "reason": "evidence_changed_or_missing",
+                        },
+                    )
+
     def evaluate(self, contract: TaskContract, context: ToolContext) -> GateDecision:
         if context.plan_manager is not None:
             plan = context.plan_manager.current
@@ -71,12 +100,14 @@ class CompletionGate:
             )
 
         last_mutation = int(context.state.get("last_mutation_sequence", 0))
-        if last_mutation == 0 and not outcome.changed_files:
+        browser_required = [item for item in contract.browser_verifications if item.required]
+        if last_mutation == 0 and not outcome.changed_files and not browser_required:
             return GateDecision(
                 action=GateAction.COMPLETE,
                 reason="A structured read-only outcome is present; no verification is required.",
             )
-        if not contract.verification_commands:
+        required = [*contract.verification_commands, *browser_required]
+        if not required:
             return GateDecision(
                 action=GateAction.UNVERIFIED,
                 reason=(
@@ -87,7 +118,7 @@ class CompletionGate:
         successes: dict[str, int] = context.state.get("verification_success", {})
         missing: list[str] = []
         stale: list[str] = []
-        for command in contract.verification_commands:
+        for command in required:
             sequence = successes.get(command.id)
             if sequence is None:
                 missing.append(command.id)

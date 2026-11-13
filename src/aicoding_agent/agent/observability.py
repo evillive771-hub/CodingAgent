@@ -11,6 +11,7 @@ _TERMINAL_EVENTS = {
     "agent.completed": "completed",
     "agent.submitted_unverified": "submitted_unverified",
     "agent.failed": "failed",
+    "agent.blocked": "blocked",
     "agent.waiting_for_user": "waiting_for_user",
     "agent.interrupted": "interrupted",
     "agent.budget_exhausted": "budget_exhausted",
@@ -48,6 +49,11 @@ class RunTelemetry(StrictModel):
     subagent_runs: int = 0
     subagent_blocked: int = 0
     subagent_findings: int = 0
+    browser_runs: int = 0
+    browser_failures: int = 0
+    browser_infra_failures: int = 0
+    # A task permits at most 1000 tool calls, with at most one environment retry per call.
+    browser_duration_ms: list[float] = Field(default_factory=list, max_length=2000)
     started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
@@ -128,6 +134,20 @@ class TelemetryRegistry:
             if str(data.get("status")) == "blocked":
                 run.subagent_blocked += 1
             run.subagent_findings += _safe_int(data.get("finding_count"))
+        elif event_type == "browser.verification_finished":
+            run.browser_runs += 1
+            status = data.get("status")
+            if status == "failed":
+                run.browser_failures += 1
+            elif status in {"infra_error", "timeout"}:
+                run.browser_infra_failures += 1
+            duration = (
+                _safe_float(data["duration_ms"])
+                if "duration_ms" in data
+                else _safe_float(data.get("duration_seconds")) * 1000
+            )
+            run.browser_duration_ms.append(duration)
+            del run.browser_duration_ms[:-2000]
         if event_type in _TERMINAL_EVENTS:
             run.status = _TERMINAL_EVENTS[event_type]
 
@@ -166,8 +186,27 @@ class TelemetryRegistry:
             f"goal_evaluations={run.goal_evaluations}; goal_ms={run.goal_duration_ms:.1f}; "
             f"goal_tokens={run.goal_tokens}; subagents={run.subagent_runs}; "
             f"subagent_blocked={run.subagent_blocked}; "
-            f"subagent_findings={run.subagent_findings}"
+            f"subagent_findings={run.subagent_findings}; browser_runs={run.browser_runs}; "
+            f"browser_failures={run.browser_failures}; browser_infra={run.browser_infra_failures}; "
+            f"browser_latency={duration_percentiles(run.browser_duration_ms)}"
         )
+
+
+def duration_percentiles(samples: list[float]) -> dict[str, float | int]:
+    """Report sample count; do not label a single measurement as a distribution."""
+    ordered = sorted(samples)
+    result: dict[str, float | int] = {"n": len(ordered)}
+    if len(ordered) == 1:
+        result["duration_ms"] = ordered[0]
+    elif len(ordered) > 1:
+        for name, quantile in (("p50_ms", 0.5), ("p90_ms", 0.9), ("p95_ms", 0.95)):
+            position = (len(ordered) - 1) * quantile
+            lower = int(position)
+            upper = min(lower + 1, len(ordered) - 1)
+            result[name] = round(
+                ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower), 3
+            )
+    return result
 
 
 def _safe_int(value: Any) -> int:

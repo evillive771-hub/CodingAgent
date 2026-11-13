@@ -1,0 +1,4 @@
+{
+  "infra_retries": 1,
+  "require_both": true
+}

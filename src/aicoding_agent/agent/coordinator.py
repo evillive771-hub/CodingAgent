@@ -165,6 +165,8 @@ class CoordinatorCandidate(StrictModel):
     change_snapshot: ChangeSnapshot | None = None
     verification: list[VerificationEvidence] = Field(default_factory=list)
     integrated_revision: str | None = None
+    regression_report: dict[str, Any] | None = None
+    tdd_evidence: dict[str, Any] | None = None
     failure_reason: str | None = Field(default=None, max_length=2000)
 
 
@@ -227,8 +229,12 @@ class CoordinatorWorkerRuntime:
         workspace: Path,
         *,
         run_id: str,
+        shared_budget: Any = None,
+        tdd_evidence: Any = None,
     ) -> AgentResult:
         self.state.lifecycle = WorkerLifecycle.WORK
+        if shared_budget is not None:
+            shared_budget.phase = "coding"
         self.state.last_task_id = contract.task_id.removeprefix("coord:")
         optional: dict[str, Any] = {"run_id": run_id}
         signature = inspect.signature(self.agent.run)
@@ -238,7 +244,33 @@ class CoordinatorWorkerRuntime:
         )
         if accepts_keywords or "conversation_history" in signature.parameters:
             optional["conversation_history"] = list(self.history)
+            if tdd_evidence is not None:
+                evidence = _serialize_tdd_evidence(tdd_evidence)
+                feedback = {
+                    "red_cases": evidence.get("red_cases", {}),
+                    "failures": [
+                        {"id": item.get("id"), "reason": item.get("reason"),
+                         "cases": item.get("cases", {})}
+                        for item in evidence.get("red_report", {}).get("tests", [])
+                    ],
+                }
+                optional["conversation_history"].append({
+                    "role": "user",
+                    "content": "Host confirmed RED. Implement the requirement and obtain GREEN "
+                    "without changing frozen tests.\n"
+                    + json.dumps(feedback, ensure_ascii=False)[:12_000],
+                })
+        supports_budget = accepts_keywords or "shared_budget" in signature.parameters
+        if shared_budget is not None and supports_budget:
+            optional["shared_budget"] = shared_budget
+        if accepts_keywords or "tdd_authorized" in signature.parameters:
+            optional["tdd_authorized"] = tdd_evidence is not None
         result = await self.agent.run(contract, workspace, **optional)
+        if shared_budget is not None and not supports_budget:
+            for _ in range(result.turns):
+                await shared_budget.charge_turn()
+            if result.tool_calls:
+                await shared_budget.charge_tools(result.tool_calls)
         assistant_text = result.final_text.strip()
         if not assistant_text and result.outcome is not None:
             assistant_text = result.outcome.summary.strip()
@@ -361,6 +393,7 @@ class MultiAgentCoordinator:
         merge_gate: CoordinatorMergeGate | None = None,
         max_workers: int = 3,
         plan_approval_timeout_seconds: float = 300.0,
+        regression_controller: Any = None,
     ) -> None:
         if not 1 <= max_workers <= 8:
             raise ValueError("Coordinator max_workers must be between 1 and 8")
@@ -376,6 +409,7 @@ class MultiAgentCoordinator:
         self.merge_gate = merge_gate or CoordinatorMergeGate()
         self.max_workers = max_workers
         self.plan_approval_timeout_seconds = plan_approval_timeout_seconds
+        self.regression_controller = regression_controller
 
     async def run(
         self,
@@ -439,6 +473,10 @@ class MultiAgentCoordinator:
         )
         integration_workspace = Path(integration_lease.path)
         integration_revision = integration_lease.base_revision
+        if self.regression_controller is not None and hasattr(
+            self.regression_controller, "initialize_source"
+        ):
+            await self.regression_controller.initialize_source(integration_workspace)
         if self.launch_manager is not None and approved_proposal_id is not None:
             await self.launch_manager.mark_started(coordinator_id, approved_proposal_id)
         integration_lock = asyncio.Lock()
@@ -539,6 +577,8 @@ class MultiAgentCoordinator:
                 result: AgentResult | None = None
                 snapshot: ChangeSnapshot | None = None
                 verification: list[VerificationEvidence] = []
+                regression_report = None
+                tdd_evidence = None
                 integrated = False
                 run_id = _safe_run_id(coordinator_id, claim.task_id, claim.attempts)
                 try:
@@ -593,17 +633,61 @@ class MultiAgentCoordinator:
                         event_type="worktree.prepared",
                         payload={"lease_id": lease.lease_id, "base_revision": lease.base_revision},
                     )
+                    shared_budget = (
+                        await self.regression_controller.budget_for(run_id, contract)
+                        if self.regression_controller is not None else None
+                    )
+                    if contract.tdd is not None and (
+                        self.regression_controller is None
+                        or not hasattr(self.regression_controller, "prepare_tdd")
+                    ):
+                        raise CoordinatorError("Required TDD needs a host regression controller")
+                    if self.regression_controller is not None and hasattr(
+                        self.regression_controller, "prepare_tdd"
+                    ):
+                        tdd_evidence = await self.regression_controller.prepare_tdd(
+                            contract,
+                            Path(lease.path),
+                            run_id=run_id,
+                            shared_budget=shared_budget,
+                            agent=runtime.agent,
+                        )
+                        if contract.tdd is not None and tdd_evidence is None:
+                            raise CoordinatorError("Required TDD did not produce RED evidence")
+                        if tdd_evidence is not None and hasattr(
+                            self.regression_controller, "resolved_tdd_contract"
+                        ):
+                            contract = await self.regression_controller.resolved_tdd_contract(
+                                run_id, contract,
+                            )
+                        if tdd_evidence is not None:
+                            await self.mailbox.append(
+                                coordinator_id=coordinator_id,
+                                owner=owner,
+                                task_id=claim.task_id,
+                                event_type="tdd.red_verified",
+                                payload={"run_id": run_id},
+                            )
                     result = await runtime.run_assignment(
                         contract,
                         Path(lease.path),
                         run_id=run_id,
+                        shared_budget=shared_budget,
+                        tdd_evidence=tdd_evidence,
                     )
-                    snapshot, verification = await self.merge_gate.validate(
+                    if shared_budget is not None:
+                        for command in contract.verification_commands:
+                            await shared_budget.reserve_command(command.id)
+                    validation = self.merge_gate.validate(
                         workspace=Path(lease.path),
                         contract=contract,
                         result=result,
                         inspector=self.inspector,
                         expected_base_revision=lease.base_revision,
+                    )
+                    snapshot, verification = (
+                        await asyncio.wait_for(validation, timeout=shared_budget.remaining_seconds)
+                        if shared_budget is not None else await validation
                     )
                     async with integration_lock:
                         conflicts = []
@@ -622,13 +706,94 @@ class MultiAgentCoordinator:
                             raise CoordinatorError(
                                 "Candidate overlaps a parallel change: " + ", ".join(conflicts)
                             )
-                        integration_revision = await self.integrator.integrate(
-                            Path(lease.path),
-                            integration_workspace,
-                            task_id=claim.task_id,
-                            expected_candidate_base=lease.base_revision,
-                        )
-                        integrated = True
+                        if self.regression_controller is not None:
+                            combination_contract = contract.model_copy(
+                                update={"base_revision": integration_revision}
+                            )
+                            combination_lease = await self.workspace_manager.prepare(
+                                repository, combination_contract,
+                                run_id=f"{run_id}-combination",
+                            )
+                            combination_workspace = Path(combination_lease.path)
+                            await self.integrator.integrate(
+                                Path(lease.path), combination_workspace,
+                                task_id=claim.task_id,
+                                expected_candidate_base=lease.base_revision,
+                            )
+                            regression_report = await self.regression_controller.verify_combination(
+                                workspace=combination_workspace,
+                                source_workspace=integration_workspace,
+                                contract=contract,
+                                run_id=f"{run_id}-combination",
+                                budget_run_id=run_id,
+                                expected_revision=integration_revision,
+                                **_optional_tdd_kwargs(
+                                    self.regression_controller.verify_combination, tdd_evidence
+                                ),
+                            )
+                            if regression_report.status != "passed":
+                                raise CoordinatorError(
+                                    regression_report.reason or "Combined regression failed"
+                                )
+                            if not await self.regression_controller.validate_combination(
+                                workspace=combination_workspace,
+                                contract=contract,
+                                report=regression_report,
+                            ):
+                                raise CoordinatorError("Combined regression evidence became stale")
+                            current_candidate = await self.inspector.snapshot(Path(lease.path))
+                            if current_candidate.change_hash != snapshot.change_hash:
+                                raise CoordinatorError(
+                                    "Candidate changed during combined regression"
+                                )
+                            current_integration = await self.inspector.snapshot(
+                                integration_workspace
+                            )
+                            if current_integration.base_revision != integration_revision:
+                                raise CoordinatorError(
+                                    "Integration revision changed during combined regression"
+                                )
+                        async def publish_combination(
+                            candidate_lease: WorkspaceLease = lease,
+                            candidate_task_id: str = claim.task_id,
+                            expected_change_hash: str = snapshot.change_hash,
+                            expected_integration_revision: str = integration_revision,
+                        ) -> None:
+                            nonlocal integration_revision, integrated
+                            if self.regression_controller is not None:
+                                candidate_now = await self.inspector.snapshot(
+                                    Path(candidate_lease.path)
+                                )
+                                integration_now = await self.inspector.snapshot(
+                                    integration_workspace
+                                )
+                                if candidate_now.change_hash != expected_change_hash:
+                                    raise CoordinatorError("Candidate changed before acceptance")
+                                if integration_now.base_revision != expected_integration_revision:
+                                    raise CoordinatorError("Integration changed before acceptance")
+                            integration_revision = await self.integrator.integrate(
+                                Path(candidate_lease.path),
+                                integration_workspace,
+                                task_id=candidate_task_id,
+                                expected_candidate_base=candidate_lease.base_revision,
+                            )
+                            integrated = True
+
+                        if self.regression_controller is not None:
+                            await self.regression_controller.record_combination_acceptance(
+                                workspace=combination_workspace,
+                                contract=contract,
+                                report=regression_report,
+                                run_id=f"{run_id}-combination",
+                                before_publish=publish_combination,
+                                **_optional_tdd_kwargs(
+                                    self.regression_controller.record_combination_acceptance,
+                                    tdd_evidence,
+                                ),
+                            )
+                            await self.workspace_manager.release(combination_lease)
+                        else:
+                            await publish_combination()
                         for path in snapshot.changed_files:
                             path_revisions[path] = integration_revision
                     evidence = [
@@ -638,6 +803,12 @@ class MultiAgentCoordinator:
                             for item in verification
                         ),
                     ]
+                    if regression_report is not None:
+                        if regression_report.report_path:
+                            evidence.append(regression_report.report_path)
+                        evidence.extend(
+                            ref for test in regression_report.tests for ref in test.evidence_refs
+                        )
                     await task_graph.complete_claim(
                         claim.task_id,
                         owner,
@@ -654,6 +825,11 @@ class MultiAgentCoordinator:
                         change_snapshot=snapshot,
                         verification=verification,
                         integrated_revision=integration_revision,
+                        regression_report=(
+                            regression_report.model_dump(mode="json")
+                            if regression_report is not None else None
+                        ),
+                        tdd_evidence=_serialize_tdd_evidence(tdd_evidence),
                     )
                     await store_candidate(candidate)
                     await self.mailbox.append(
@@ -699,6 +875,11 @@ class MultiAgentCoordinator:
                             agent_result=result,
                             change_snapshot=snapshot,
                             verification=verification,
+                            regression_report=(
+                                regression_report.model_dump(mode="json")
+                                if regression_report is not None else None
+                            ),
+                            tdd_evidence=_serialize_tdd_evidence(tdd_evidence),
                             failure_reason=reason,
                         )
                     )
@@ -833,6 +1014,23 @@ def _safe_run_id(coordinator_id: str, task_id: str, attempt: int) -> str:
 def _safe_failure(exc: Exception) -> str:
     message = " ".join(str(exc).split())[:1500]
     return f"{type(exc).__name__}: {message or 'operation failed'}"
+
+
+def _optional_tdd_kwargs(method: Any, evidence: Any) -> dict[str, Any]:
+    if evidence is None:
+        return {}
+    parameters = inspect.signature(method).parameters
+    if "tdd_evidence" in parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+    ):
+        return {"tdd_evidence": evidence}
+    raise CoordinatorError("Regression controller does not support TDD evidence")
+
+
+def _serialize_tdd_evidence(evidence: Any) -> dict[str, Any] | None:
+    if evidence is None:
+        return None
+    return evidence.model_dump(mode="json") if hasattr(evidence, "model_dump") else dict(evidence)
 
 
 def _safe_process_environment() -> dict[str, str]:

@@ -5,7 +5,7 @@ import inspect
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 from uuid import uuid4
 
 from aicoding_agent.agent.background import BackgroundTaskManager
@@ -39,6 +39,9 @@ from aicoding_agent.domain.models import (
     TaskContract,
     TaskSource,
 )
+
+if TYPE_CHECKING:
+    from aicoding_agent.regression.controller import RegressionController
 
 
 class ConversationalAgent(Protocol):
@@ -82,6 +85,7 @@ class ChatSession:
         team_launch_manager: TeamLaunchManager | None = None,
         team_plan_approval_manager: TeamPlanApprovalManager | None = None,
         team_message_bus: TeamMessageBus | None = None,
+        regression_controller: RegressionController | None = None,
     ) -> None:
         if profile.target_environment != TargetEnvironment.LOCAL:
             raise ValueError("Conversational coding only permits the local target environment")
@@ -103,6 +107,7 @@ class ChatSession:
         self.team_launch_manager = team_launch_manager
         self.team_plan_approval_manager = team_plan_approval_manager
         self.team_message_bus = team_message_bus
+        self.regression_controller = regression_controller
         self.turns: list[ChatTurn] = []
         self._last_context: ConversationContext | None = None
         self._initialized = False
@@ -532,11 +537,15 @@ class ChatSession:
                 for key, value in optional_arguments.items()
                 if key in signature.parameters
             }
-        result = await self.agent.run(
-            contract,
-            self.workspace,
-            **optional_arguments,
-        )
+        if self.regression_controller is None:
+            result = await self.agent.run(contract, self.workspace, **optional_arguments)
+        else:
+            outcome = await self.regression_controller.run(
+                contract, self.workspace, run_id=run_id, agent=self.agent,
+                agent_kwargs=optional_arguments, adopt=True,
+                adoption_journal=self.mutation_journal,
+            )
+            result = outcome.agent_result
         turn = ChatTurn(
             turn_number=turn_number,
             run_id=run_id,

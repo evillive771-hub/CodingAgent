@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 from pydantic import ValidationError
@@ -207,7 +209,7 @@ class ToolExecutor:
             if tool.concurrency_safe:
                 execution = await tool.run(arguments, context)
             else:
-                async with self._mutation_lock:
+                async with self._mutation_lock, self._workspace_guard(context, tool.risk):
                     argument_data = arguments.model_dump()
                     raw_path = argument_data.get("path")
                     if tool.risk == ToolRisk.WRITE and isinstance(raw_path, str):
@@ -299,6 +301,17 @@ class ToolExecutor:
                 context.state["last_mutation_sequence"] = operation_sequence
                 context.state["coding_outcome"] = None
                 context.state.pop("file_observations", None)
+                for browser_id in context.state["browser_verification_results"]:
+                    if context.state["verification_success"].pop(browser_id, None) is not None:
+                        await self._emit(
+                            context,
+                            "browser.verification_invalidated",
+                            {
+                                "verification_id": browser_id,
+                                "reason": "Workspace mutated after browser verification",
+                                "sequence": operation_sequence,
+                            },
+                        )
             if call.name == "read_file":
                 observations = context.state.setdefault("file_observations", {})
                 observations[f"file:{operation_sequence}"] = (
@@ -309,7 +322,11 @@ class ToolExecutor:
                 while len(observations) > 8:
                     del observations[next(iter(observations))]
             verification_id = execution.data.get("verification_id")
-            if verification_id and execution.data.get("exit_code") == 0:
+            if (
+                verification_id
+                and execution.data.get("exit_code") == 0
+                and call.name != "run_playwright"
+            ):
                 context.state["verification_success"][verification_id] = operation_sequence
         except ToolError as exc:
             result = ToolResult(
@@ -349,6 +366,31 @@ class ToolExecutor:
             },
         )
         return result
+
+    @asynccontextmanager
+    async def _workspace_guard(self, context: ToolContext, risk: ToolRisk) -> AsyncIterator[None]:
+        # Opted-in workspaces serialize validation and writers from legacy contracts too.
+        # Other workspaces preserve existing independent per-file write concurrency.
+        if context.contract.browser_verifications:
+            await self.enable_browser_guard(context.workspace)
+        marker = context.workspace / ".aicoding-agent" / "browser-validation-enabled"
+        if context.contract.browser_verifications or (
+            risk == ToolRisk.WRITE and await asyncio.to_thread(marker.exists)
+        ):
+            target = context.workspace / ".aicoding-agent" / "browser-workspace-guard"
+            async with self.file_locks.acquire(context.workspace, target, owner=context.run_id):
+                yield
+        else:
+            yield
+
+    @staticmethod
+    async def enable_browser_guard(workspace: Path) -> None:
+        def enable() -> None:
+            marker = workspace / ".aicoding-agent" / "browser-validation-enabled"
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.touch(exist_ok=True)
+
+        await asyncio.to_thread(enable)
 
     @staticmethod
     async def _emit(context: ToolContext, event_type: str, data: dict[str, Any]) -> None:

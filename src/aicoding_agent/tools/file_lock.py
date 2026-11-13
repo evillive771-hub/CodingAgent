@@ -131,6 +131,7 @@ class WorkspaceFileLockManager:
 
     @staticmethod
     def _open_lock_file(path: Path) -> BinaryIO:
+        path = _native_path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         handle = path.open("a+b")
         handle.seek(0, os.SEEK_END)
@@ -142,6 +143,7 @@ class WorkspaceFileLockManager:
 
     @staticmethod
     def _write_metadata(path: Path, payload: dict[str, object]) -> None:
+        path = _native_path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
         try:
@@ -156,6 +158,7 @@ class WorkspaceFileLockManager:
 
     @staticmethod
     def _read_holder(path: Path) -> str | None:
+        path = _native_path(path)
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError, TypeError):
@@ -208,7 +211,19 @@ class WorkspaceFileLockManager:
     ) -> None:
         try:
             if acquired:
-                metadata_path.unlink(missing_ok=True)
+                _native_path(metadata_path).unlink(missing_ok=True)
                 cls._unlock(handle)
         finally:
             handle.close()
+
+
+def _native_path(path: Path) -> Path:
+    """Use native extended-length paths for deeply nested Windows worktrees."""
+    if sys.platform != "win32":
+        return path
+    value = str(path.absolute())
+    if value.startswith("\\\\?\\"):
+        return path
+    if value.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + value[2:])
+    return Path("\\\\?\\" + value)

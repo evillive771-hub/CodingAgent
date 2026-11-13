@@ -1,0 +1,12 @@
+{
+  "suites": [{
+    "id": "counter-public",
+    "command": ["node", "node_modules/@playwright/test/cli.js", "test", "--config=playwright.config.cjs", "--forbid-only", "--workers=1", "--retries=0"],
+    "cwd": "host",
+    "test_files": ["counter.spec.cjs", "playwright.config.cjs", "package.json"],
+    "expected_tests": ["counter cannot decrement below zero", "increment and decrement preserve positive values"],
+    "preview_command": ["python", "-m", "http.server", "8087", "--bind", "127.0.0.1"],
+    "preview_url": "http://127.0.0.1:8087/",
+    "input_globs": ["*.js", "*.html"]
+  }]
+}
